@@ -2,22 +2,28 @@ from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
-import json
 import os
 import logging
 from openai import OpenAI
 from dotenv import load_dotenv
+import json
+from db import SessionLocal, Token
 
 # ---------------------------
 # Load environment variables
 # ---------------------------
-load_dotenv()  # Load .env file
+load_dotenv()
 
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "http://127.0.0.1:8000/auth/callback")
-SCOPES = os.getenv("SCOPES", "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly")
-TOKENS_FILE = os.getenv("TOKENS_FILE", "tokens.json")
+REDIRECT_URI = os.getenv(
+    "REDIRECT_URI",
+    "https://ai-data-analyst-backend-1nuw.onrender.com/auth/callback"
+)
+SCOPES = os.getenv(
+    "SCOPES",
+    "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly"
+)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ---------------------------
@@ -31,10 +37,13 @@ logger = logging.getLogger("main")
 # ---------------------------
 app = FastAPI()
 
-# Allow frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://ai-data-analyst-8f97oj3fy-mandlas-projects-228bb82e.vercel.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,17 +55,35 @@ app.add_middleware(
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------------------------
-# Token storage
+# SQLite token helpers
 # ---------------------------
-if os.path.exists(TOKENS_FILE):
-    with open(TOKENS_FILE, "r") as f:
-        tokens_store = json.load(f)
-else:
-    tokens_store = {}
+def save_token(user_id, token_data):
+    session = SessionLocal()
+    token_json = json.dumps(token_data)
+    token = session.query(Token).filter(Token.user_id == user_id).first()
+    if token:
+        token.token_data = token_json
+    else:
+        token = Token(user_id=user_id, token_data=token_json)
+        session.add(token)
+    session.commit()
+    session.close()
 
-def save_tokens():
-    with open(TOKENS_FILE, "w") as f:
-        json.dump(tokens_store, f, indent=2)
+def get_token(user_id):
+    session = SessionLocal()
+    token = session.query(Token).filter(Token.user_id == user_id).first()
+    session.close()
+    if token:
+        return json.loads(token.token_data)
+    return None
+
+def delete_token(user_id):
+    session = SessionLocal()
+    token = session.query(Token).filter(Token.user_id == user_id).first()
+    if token:
+        session.delete(token)
+        session.commit()
+    session.close()
 
 # ---------------------------
 # OAuth routes
@@ -101,10 +128,9 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         return JSONResponse({"error": "Failed to get access token", "details": token_data}, status_code=400)
 
     user_id = state or "unknown_user"
-    tokens_store[user_id] = token_data
-    save_tokens()
+    save_token(user_id, token_data)
 
-    redirect_url = f"http://localhost:3000/integrations?user_id={user_id}&connected=true&type=google_sheets"
+    redirect_url = f"https://ai-data-analyst-8f97oj3fy-mandlas-projects-228bb82e.vercel.app/integrations?user_id={user_id}&connected=true&type=google_sheets"
     return RedirectResponse(redirect_url)
 
 # ---------------------------
@@ -112,18 +138,19 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
 # ---------------------------
 @app.get("/connected-apps")
 async def connected_apps(user_id: str):
-    return JSONResponse({"google_sheets": user_id in tokens_store})
+    token = get_token(user_id)
+    return JSONResponse({"google_sheets": bool(token)})
 
 # ---------------------------
 # Google Sheets API
 # ---------------------------
 @app.get("/sheets-list/{user_id}")
 async def sheets_list(user_id: str):
-    if user_id not in tokens_store:
+    token_data = get_token(user_id)
+    if not token_data:
         return JSONResponse({"error": "User not connected"}, status_code=400)
 
-    access_token = tokens_store[user_id]["access_token"]
-
+    access_token = token_data["access_token"]
     files_url = "https://www.googleapis.com/drive/v3/files"
     params = {
         "q": "mimeType='application/vnd.google-apps.spreadsheet'",
@@ -139,10 +166,11 @@ async def sheets_list(user_id: str):
 
 @app.get("/sheets/{user_id}/{sheet_id:path}")
 async def get_sheet(user_id: str, sheet_id: str):
-    if user_id not in tokens_store:
+    token_data = get_token(user_id)
+    if not token_data:
         return JSONResponse({"error": "User not connected"}, status_code=400)
 
-    access_token = tokens_store[user_id]["access_token"]
+    access_token = token_data["access_token"]
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/A1:Z1000"
     headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -159,9 +187,8 @@ async def get_sheet(user_id: str, sheet_id: str):
 async def disconnect(payload: dict):
     user_id = payload.get("user_id")
     app_key = payload.get("app")
-    if app_key == "google_sheets" and user_id in tokens_store:
-        del tokens_store[user_id]
-        save_tokens()
+    if app_key == "google_sheets":
+        delete_token(user_id)
     return JSONResponse({"status": "disconnected"})
 
 # ---------------------------
