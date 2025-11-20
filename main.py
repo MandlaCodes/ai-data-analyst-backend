@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import os
@@ -45,17 +45,12 @@ logger = logging.getLogger("main")
 # ---------------------------------------------------
 app = FastAPI()
 
-FRONTEND_URLS = [
-    "https://ai-data-analyst-538stxz7v-mandlas-projects-228bb82e.vercel.app",
-    "https://ai-data-analyst-swart.vercel.app"
-]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        *FRONTEND_URLS
+        "https://ai-data-analyst-8f97oj3fy-mandlas-projects-228bb82e.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -71,6 +66,8 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # TOKEN HELPERS (SQLite)
 # ---------------------------------------------------
 def save_token(user_id, token_data):
+    logger.info(f"Saving token for user_id={user_id}")
+
     session = SessionLocal()
     token_data["created_at"] = datetime.utcnow().isoformat()
     data_json = json.dumps(token_data)
@@ -104,6 +101,8 @@ def delete_token(user_id):
 # ---------------------------------------------------
 @app.get("/auth/google")
 async def auth_google(user_id: str):
+    logger.info(f"/auth/google called with user_id={user_id}")
+
     url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={CLIENT_ID}"
@@ -122,6 +121,9 @@ async def auth_google_sheets(user_id: str):
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request, code: str = None, state: str = None):
+
+    logger.info(f"OAuth callback received: code={code is not None}, state={state}")
+
     if not code:
         return JSONResponse({"error": "No code in callback"}, status_code=400)
 
@@ -138,30 +140,27 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         resp = await http_client.post(token_url, data=data)
         token_data = resp.json()
 
+    logger.info(f"Token response from Google: {token_data}")
+
     if "access_token" not in token_data:
-        return JSONResponse({"error": "Failed to retrieve token", "data": token_data}, status_code=400)
+        return JSONResponse({
+            "error": "Failed to retrieve token",
+            "data": token_data
+        }, status_code=400)
 
     user_id = state or "unknown_user"
+
+    logger.info(f"Saving token under user_id={user_id}")
     save_token(user_id, token_data)
+    
+    frontend_redirect = (
+        "https://ai-data-analyst-8f97oj3fy-mandlas-projects-228bb82e.vercel.app/"
+        f"integrations?user_id={user_id}&connected=true&type=google_sheets"
+    )
 
-    frontend_origin = FRONTEND_URLS[0]
+    logger.info(f"Redirecting user to frontend: {frontend_redirect}")
 
-    html_content = f"""
-    <html>
-      <body>
-        <script>
-          if (window.opener) {{
-            window.opener.postMessage('oauth-success', '{frontend_origin}');
-            window.close();
-          }} else {{
-            window.location.href = '{frontend_origin}/integrations?user_id={user_id}&connected=true&type=google_sheets';
-          }}
-        </script>
-        <p>If this window does not close automatically, you can close it manually.</p>
-      </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+    return RedirectResponse(frontend_redirect)
 
 # ---------------------------------------------------
 # CONNECTED APPS
@@ -252,9 +251,7 @@ Dataset:
             temperature=0.4,
             max_tokens=350
         )
-
-        summary = response.choices[0].message["content"].strip()
-
+        summary = response.choices[0].message.content.strip()
     except Exception as e:
         logger.error("OpenAI error: %s", e)
         summary = (
