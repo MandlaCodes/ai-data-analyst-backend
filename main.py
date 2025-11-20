@@ -144,8 +144,6 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     user_id = state or "unknown_user"
     save_token(user_id, token_data)
 
-    # Send postMessage to frontend popup
-    # Default to first frontend URL
     frontend_origin = FRONTEND_URLS[0]
 
     html_content = f"""
@@ -254,7 +252,9 @@ Dataset:
             temperature=0.4,
             max_tokens=350
         )
-        summary = response.choices[0].message.content.strip()
+
+        summary = response.choices[0].message["content"].strip()
+
     except Exception as e:
         logger.error("OpenAI error: %s", e)
         summary = (
