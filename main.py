@@ -45,12 +45,17 @@ logger = logging.getLogger("main")
 # ---------------------------------------------------
 app = FastAPI()
 
+FRONTEND_URLS = [
+    "https://ai-data-analyst-538stxz7v-mandlas-projects-228bb82e.vercel.app",
+    "https://ai-data-analyst-swart.vercel.app"
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "https://ai-data-analyst-8f97oj3fy-mandlas-projects-228bb82e.vercel.app"
+        *FRONTEND_URLS
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -139,13 +144,20 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     user_id = state or "unknown_user"
     save_token(user_id, token_data)
 
-    # Popup flow: send a postMessage to the main window
-    html_content = """
+    # Send postMessage to frontend popup
+    # Default to first frontend URL
+    frontend_origin = FRONTEND_URLS[0]
+
+    html_content = f"""
     <html>
       <body>
         <script>
-          window.opener.postMessage('oauth-success', '*');
-          window.close();
+          if (window.opener) {{
+            window.opener.postMessage('oauth-success', '{frontend_origin}');
+            window.close();
+          }} else {{
+            window.location.href = '{frontend_origin}/integrations?user_id={user_id}&connected=true&type=google_sheets';
+          }}
         </script>
         <p>If this window does not close automatically, you can close it manually.</p>
       </body>
