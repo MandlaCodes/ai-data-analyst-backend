@@ -34,6 +34,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
 # --------------------------
+# CHECK ENV VARIABLES
+# --------------------------
+if not CLIENT_ID or not CLIENT_SECRET:
+    logger.error("CLIENT_ID or CLIENT_SECRET is missing. Exiting.")
+    import sys
+    sys.exit(1)
+
+# --------------------------
 # APP
 # --------------------------
 app = FastAPI()
@@ -50,33 +58,45 @@ app.add_middleware(
 # TOKEN HELPERS
 # --------------------------
 def save_token(user_email: str, token_data: dict):
-    session = SessionLocal()
-    token_data["created_at"] = datetime.utcnow().isoformat()
-    data_json = json.dumps(token_data)
-    token = session.query(Token).filter(Token.user_id == user_email).first()
-    if token:
-        token.token_data = data_json
-    else:
-        token = Token(user_id=user_email, token_data=data_json)
-        session.add(token)
-    session.commit()
-    session.close()
+    try:
+        session = SessionLocal()
+        token_data["created_at"] = datetime.utcnow().isoformat()
+        data_json = json.dumps(token_data)
+        token = session.query(Token).filter(Token.user_id == user_email).first()
+        if token:
+            token.token_data = data_json
+        else:
+            token = Token(user_id=user_email, token_data=data_json)
+            session.add(token)
+        session.commit()
+    except Exception as e:
+        logger.error(f"Error saving token for {user_email}: {e}")
+    finally:
+        session.close()
 
 def get_token(user_email: str):
-    session = SessionLocal()
-    token = session.query(Token).filter(Token.user_id == user_email).first()
-    session.close()
-    if token:
-        return json.loads(token.token_data)
+    try:
+        session = SessionLocal()
+        token = session.query(Token).filter(Token.user_id == user_email).first()
+        if token:
+            return json.loads(token.token_data)
+    except Exception as e:
+        logger.error(f"Error getting token for {user_email}: {e}")
+    finally:
+        session.close()
     return None
 
 def delete_token(user_email: str):
-    session = SessionLocal()
-    token = session.query(Token).filter(Token.user_id == user_email).first()
-    if token:
-        session.delete(token)
-        session.commit()
-    session.close()
+    try:
+        session = SessionLocal()
+        token = session.query(Token).filter(Token.user_id == user_email).first()
+        if token:
+            session.delete(token)
+            session.commit()
+    except Exception as e:
+        logger.error(f"Error deleting token for {user_email}: {e}")
+    finally:
+        session.close()
 
 # --------------------------
 # OAUTH ROUTES
