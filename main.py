@@ -21,9 +21,10 @@ SCOPES = os.environ.get(
     "SCOPES",
     "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly"
 )
+
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    raise Exception("OPENAI_API_KEY is missing")
+    raise Exception("OPENAI_API_KEY missing")
 
 app = FastAPI()
 
@@ -38,33 +39,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------
-# Token helpers
-# -------------------------
+# -----------------------------
+# DATABASE TOKEN HELPERS
+# -----------------------------
 def save_token(user_id, token_data):
     session = SessionLocal()
     token_data["created_at"] = datetime.utcnow().isoformat()
     data_json = json.dumps(token_data)
+
     token = session.query(Token).filter(Token.user_id == user_id).first()
+
     if token:
         token.token_data = data_json
     else:
         token = Token(user_id=user_id, token_data=data_json)
         session.add(token)
+
     session.commit()
     session.close()
+
 
 def get_token(user_id):
     session = SessionLocal()
     token = session.query(Token).filter(Token.user_id == user_id).first()
     session.close()
+
     if token:
         return json.loads(token.token_data)
     return None
 
-# -------------------------
-# OAuth routes
-# -------------------------
+# -----------------------------
+# GOOGLE OAUTH — START
+# -----------------------------
 @app.get("/auth/google_sheets")
 async def auth_google_sheets(user_id: str):
     url = (
@@ -82,9 +88,8 @@ async def auth_google_sheets(user_id: str):
 @app.get("/auth/callback")
 async def auth_callback(request: Request, code: str = None, state: str = None):
     if not code:
-        return JSONResponse({"error": "No code in callback"}, status_code=400)
+        return JSONResponse({"error": "No code received"}, status_code=400)
 
-    token_url = "https://oauth2.googleapis.com/token"
     data = {
         "code": code,
         "client_id": CLIENT_ID,
@@ -94,42 +99,56 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     }
 
     async with httpx.AsyncClient() as http_client:
-        resp = await http_client.post(token_url, data=data)
+        resp = await http_client.post("https://oauth2.googleapis.com/token", data=data)
         token_data = resp.json()
 
-    user_id = state or "unknown_user"
+    user_id = state or "unknown"
     save_token(user_id, token_data)
 
-    frontend_redirect = f"https://ai-data-analyst-frontend.vercel.app/integrations?user_id={user_id}&connected=true&type=google_sheets"
+    # FIX: redirect to the correct page
+    frontend_redirect = (
+        f"https://ai-data-analyst-frontend.vercel.app/dashboard/integrations"
+        f"?user_id={user_id}&connected=true&type=google_sheets"
+    )
+
     return RedirectResponse(frontend_redirect)
 
-# -------------------------
-# Connected apps
-# -------------------------
+# -----------------------------
+# CONNECTED APPS
+# -----------------------------
 @app.get("/connected-apps")
 async def connected_apps(user_id: str):
     token_data = get_token(user_id)
+
     return JSONResponse({
         "google_sheets": bool(token_data),
         "google_sheets_last_sync": token_data.get("created_at") if token_data else None
     })
 
-# -------------------------
-# List Google Sheets
-# -------------------------
+# -----------------------------
+# SHEETS LISTING
+# -----------------------------
 @app.get("/sheets-list/{user_id}")
 async def sheets_list(user_id: str):
     token_data = get_token(user_id)
+
     if not token_data:
-        return JSONResponse({"error": "User not connected"}, status_code=400)
+        return JSONResponse({"error": "Google Sheets not connected"}, status_code=400)
 
     headers = {"Authorization": f"Bearer {token_data['access_token']}"}
-    url = "https://www.googleapis.com/drive/v3/files"
+
     params = {
         "q": "mimeType='application/vnd.google-apps.spreadsheet'",
         "fields": "files(id,name)"
     }
 
     async with httpx.AsyncClient() as http_client:
-        resp = await http_client.get(url, headers=headers, params=params)
-        return JSONResponse({"spreadsheets": resp.json().get("files", [])})
+        resp = await http_client.get(
+            "https://www.googleapis.com/drive/v3/files",
+            headers=headers,
+            params=params
+        )
+
+    files = resp.json().get("files", [])
+
+    return JSONResponse({"sheets": files})
