@@ -28,25 +28,29 @@ if not OPENAI_API_KEY:
 
 app = FastAPI()
 
+# ---------------------------------------------------
+# CORS (UPDATED TO NEW FRONTEND DEPLOYMENT URL)
+# ---------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://ai-data-analyst-frontend.vercel.app"
+        "https://ai-data-analyst-87smeo628-mandlas-projects-228bb82e.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -----------------------------
+
+# ---------------------------------------------------
 # DATABASE TOKEN HELPERS
-# -----------------------------
+# ---------------------------------------------------
 def save_token(user_id, token_data):
     session = SessionLocal()
     token_data["created_at"] = datetime.utcnow().isoformat()
-    data_json = json.dumps(token_data)
 
+    data_json = json.dumps(token_data)
     token = session.query(Token).filter(Token.user_id == user_id).first()
 
     if token:
@@ -68,9 +72,10 @@ def get_token(user_id):
         return json.loads(token.token_data)
     return None
 
-# -----------------------------
+
+# ---------------------------------------------------
 # GOOGLE OAUTH — START
-# -----------------------------
+# ---------------------------------------------------
 @app.get("/auth/google_sheets")
 async def auth_google_sheets(user_id: str):
     url = (
@@ -84,6 +89,7 @@ async def auth_google_sheets(user_id: str):
         f"&state={user_id}"
     )
     return RedirectResponse(url)
+
 
 @app.get("/auth/callback")
 async def auth_callback(request: Request, code: str = None, state: str = None):
@@ -105,17 +111,18 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     user_id = state or "unknown"
     save_token(user_id, token_data)
 
-    # FIX: redirect to the correct page
+    # FIXED: redirect to the NEW frontend deployment
     frontend_redirect = (
-        f"https://ai-data-analyst-frontend.vercel.app/dashboard/integrations"
+        f"https://ai-data-analyst-87smeo628-mandlas-projects-228bb82e.vercel.app/dashboard/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets"
     )
 
     return RedirectResponse(frontend_redirect)
 
-# -----------------------------
+
+# ---------------------------------------------------
 # CONNECTED APPS
-# -----------------------------
+# ---------------------------------------------------
 @app.get("/connected-apps")
 async def connected_apps(user_id: str):
     token_data = get_token(user_id)
@@ -125,9 +132,10 @@ async def connected_apps(user_id: str):
         "google_sheets_last_sync": token_data.get("created_at") if token_data else None
     })
 
-# -----------------------------
-# SHEETS LISTING
-# -----------------------------
+
+# ---------------------------------------------------
+# LIST GOOGLE SHEETS FILES
+# ---------------------------------------------------
 @app.get("/sheets-list/{user_id}")
 async def sheets_list(user_id: str):
     token_data = get_token(user_id)
