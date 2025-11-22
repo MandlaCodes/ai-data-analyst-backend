@@ -106,12 +106,12 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     user_id = state or "unknown"
     save_token(user_id, token_data)
 
-    # ✅ Redirect to Dashboard with query param to open Integrations tab
     frontend_redirect = (
         f"https://ai-data-analyst-87smeo628-mandlas-projects-228bb82e.vercel.app/dashboard"
         f"?user_id={user_id}&connected=true&type=google_sheets"
     )
     return RedirectResponse(frontend_redirect)
+
 
 # -------------------------
 # CONNECTED APPS
@@ -123,6 +123,7 @@ async def connected_apps(user_id: str):
         "google_sheets": bool(token_data),
         "google_sheets_last_sync": token_data.get("created_at") if token_data else None
     })
+
 
 # -------------------------
 # LIST GOOGLE SHEETS
@@ -148,3 +149,33 @@ async def sheets_list(user_id: str):
     files = resp.json().get("files", [])
 
     return JSONResponse({"sheets": files})
+
+
+# -------------------------
+# GET SHEET DATA
+# -------------------------
+@app.get("/sheets/{user_id}/{sheet_id}")
+async def get_sheet_data(user_id: str, sheet_id: str):
+    token_data = get_token(user_id)
+    if not token_data:
+        return JSONResponse({"error": "Google Sheets not connected"}, status_code=400)
+
+    headers = {"Authorization": f"Bearer {token_data['access_token']}"}
+
+    # Fetch all sheets inside the spreadsheet
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values:batchGet"
+    params = {"ranges": [], "majorDimension": "ROWS"}  # fetch all rows
+
+    async with httpx.AsyncClient() as http_client:
+        resp = await http_client.get(url, headers=headers, params=params)
+        data = resp.json()
+
+    all_values = []
+
+    if "valueRanges" in data:
+        for vr in data["valueRanges"]:
+            all_values.extend(vr.get("values", []))
+    elif "values" in data:
+        all_values = data["values"]
+
+    return JSONResponse({"values": all_values})
