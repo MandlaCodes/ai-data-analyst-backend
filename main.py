@@ -80,10 +80,9 @@ async def get_valid_access_token(user_id):
     expires_in = token_data.get("expires_in", 0)
     refresh_token = token_data.get("refresh_token")
 
-    # Check if token is expired (simplified)
+    # Check if token is expired
     created_at = datetime.fromisoformat(token_data.get("created_at"))
     if (datetime.utcnow() - created_at).total_seconds() > expires_in - 60 and refresh_token:
-        # refresh token
         data = {
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
@@ -138,8 +137,11 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     user_id = state or "unknown"
     save_token(user_id, token_data)
 
+    # -------------------------
+    # Redirect to NEW integrations page
+    # -------------------------
     frontend_redirect = (
-        f"https://ai-data-analyst-87smeo628-mandlas-projects-228bb82e.vercel.app/dashboard"
+        f"https://ai-data-analyst-87smeo628-mandlas-projects-228bb82e.vercel.app/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets"
     )
     return RedirectResponse(frontend_redirect)
