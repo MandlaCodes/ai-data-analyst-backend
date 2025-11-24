@@ -138,11 +138,11 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     save_token(user_id, token_data)
 
     # -------------------------
-    # Redirect to NEW integrations page
+    # Redirect to Integrations page with timestamp to prevent caching old dashboard
     # -------------------------
     frontend_redirect = (
         f"https://ai-data-analyst-87smeo628-mandlas-projects-228bb82e.vercel.app/integrations"
-        f"?user_id={user_id}&connected=true&type=google_sheets"
+        f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
 
