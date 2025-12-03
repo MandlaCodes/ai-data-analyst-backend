@@ -7,7 +7,8 @@ import json
 from datetime import datetime
 from db import SessionLocal, Token
 from dotenv import load_dotenv
-from gpt4all import GPT4All
+import openai
+
 
 load_dotenv()
 
@@ -189,8 +190,8 @@ async def get_sheet_data(user_id: str, sheet_id: str):
 # --------------------------------------------------------------------
 # 🔥 AI DATA ANALYSIS ENDPOINT — METRICS BASED 🔥
 # --------------------------------------------------------------------
-local_model = GPT4All("ggml-gpt4all-j-v1.3-groovy")  # adjust model path/name if needed
 
+openai.api_key = os.environ.get("OPENAI_API_KEY")
 @app.post("/ai/analyze")
 async def ai_analyze(request: Request):
     """
@@ -205,7 +206,7 @@ async def ai_analyze(request: Request):
     if not kpis:
         return JSONResponse({"error": "No KPIs provided"}, status_code=400)
 
-    # Build a clean prompt for the local AI
+    # Build the prompt
     prompt = f"""
 You are an expert business and financial analyst.
 
@@ -231,7 +232,14 @@ Analyze the data and provide:
 Return your response in a structured format with headings.
 """
 
-    # Generate local AI response
-    output = local_model.generate(prompt, max_tokens=500)
-
-    return JSONResponse({"analysis": output})
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",  # <-- Use GPT-3.5 instead of GPT-4
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=1000
+        )
+        output = response.choices[0].message.content
+        return JSONResponse({"analysis": output})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
