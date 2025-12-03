@@ -1,3 +1,4 @@
+# src/main.py
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,9 +8,10 @@ import json
 from datetime import datetime
 from db import SessionLocal, Token
 from dotenv import load_dotenv
-import openai
 
-
+# -----------------------
+# Load env variables
+# -----------------------
 load_dotenv()
 
 CLIENT_ID = os.environ.get("CLIENT_ID")
@@ -23,13 +25,11 @@ SCOPES = os.environ.get(
     "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly"
 )
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise Exception("OPENAI_API_KEY missing")
-
 app = FastAPI()
 
+# -----------------------
 # CORS
+# -----------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -41,7 +41,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -----------------------
 # DATABASE TOKEN HELPERS
+# -----------------------
 def save_token(user_id, token_data):
     session = SessionLocal()
     token_data["created_at"] = datetime.utcnow().isoformat()
@@ -66,7 +68,9 @@ def get_token(user_id):
         return json.loads(token.token_data)
     return None
 
+# -----------------------
 # GOOGLE TOKEN REFRESH
+# -----------------------
 async def get_valid_access_token(user_id):
     token_data = get_token(user_id)
     if not token_data:
@@ -95,7 +99,9 @@ async def get_valid_access_token(user_id):
 
     return access_token
 
+# -----------------------
 # GOOGLE OAUTH ROUTES
+# -----------------------
 @app.get("/auth/google_sheets")
 async def auth_google_sheets(user_id: str):
     url = (
@@ -137,7 +143,9 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     )
     return RedirectResponse(frontend_redirect)
 
+# -----------------------
 # CONNECTED APPS
+# -----------------------
 @app.get("/connected-apps")
 async def connected_apps(user_id: str):
     token_data = get_token(user_id)
@@ -146,7 +154,9 @@ async def connected_apps(user_id: str):
         "google_sheets_last_sync": token_data.get("created_at") if token_data else None
     })
 
+# -----------------------
 # LIST GOOGLE SHEETS
+# -----------------------
 @app.get("/sheets-list/{user_id}")
 async def sheets_list(user_id: str):
     access_token = await get_valid_access_token(user_id)
@@ -165,7 +175,9 @@ async def sheets_list(user_id: str):
     files = resp.json().get("files", [])
     return JSONResponse({"sheets": files})
 
+# -----------------------
 # GET SHEET DATA
+# -----------------------
 @app.get("/sheets/{user_id}/{sheet_id}")
 async def get_sheet_data(user_id: str, sheet_id: str):
     access_token = await get_valid_access_token(user_id)
@@ -184,20 +196,33 @@ async def get_sheet_data(user_id: str, sheet_id: str):
     values = ranges[0].get("values", [])
     return JSONResponse({"values": values})
 
-# --------------------------------------------------------------------
-# 🔥🔥🔥 AI DATA ANALYSIS ENDPOINT (Option 1) 🔥🔥🔥
-# --------------------------------------------------------------------
-# --------------------------------------------------------------------
-# 🔥 AI DATA ANALYSIS ENDPOINT — METRICS BASED 🔥
-# --------------------------------------------------------------------
+# -----------------------
+# GPT4All Local Model
+# -----------------------
+from gpt4all import GPT4All
+import requests
 
-openai.api_key = os.environ.get("OPENAI_API_KEY")
+MODEL_NAME = "orca-mini-3b"
+MODEL_PATH = os.path.join("models", f"{MODEL_NAME}.gguf")
+os.makedirs("models", exist_ok=True)
+
+if not os.path.isfile(MODEL_PATH):
+    print(f"Downloading {MODEL_NAME} model...")
+    url = "https://gpt4all.io/models/ggml-orca-mini-3b.gguf"  # Check if valid
+    r = requests.get(url, stream=True)
+    with open(MODEL_PATH, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+    print("Model downloaded!")
+
+gpt_model = GPT4All(model_name=MODEL_PATH)
+
+# -----------------------
+# AI ANALYSIS ENDPOINT
+# -----------------------
 @app.post("/ai/analyze")
 async def ai_analyze(request: Request):
-    """
-    Analyze data metrics (KPIs, categories) instead of raw rows.
-    Returns structured, actionable insights.
-    """
     body = await request.json()
     kpis = body.get("kpis")
     categories = body.get("categories")
@@ -206,7 +231,6 @@ async def ai_analyze(request: Request):
     if not kpis:
         return JSONResponse({"error": "No KPIs provided"}, status_code=400)
 
-    # Build the prompt
     prompt = f"""
 You are an expert business and financial analyst.
 
@@ -233,22 +257,8 @@ Return your response in a structured format with headings.
 """
 
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=1000
-        )
-        # Safely access the response
-        output = ""
-        if response.choices and len(response.choices) > 0:
-            output = getattr(response.choices[0].message, "content", "No content returned")
-        else:
-            output = "No response returned from OpenAI."
-
+        output = gpt_model.generate(prompt, streaming=False)
         return JSONResponse({"analysis": output})
     except Exception as e:
-        # Log the error to server logs
-        print("OpenAI API error:", e)
+        print("GPT4All error:", e)
         return JSONResponse({"error": str(e)}, status_code=500)
-
