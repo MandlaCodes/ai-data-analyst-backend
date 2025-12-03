@@ -7,6 +7,7 @@ import json
 from datetime import datetime
 from db import SessionLocal, Token
 from dotenv import load_dotenv
+from gpt4all import GPT4All
 
 load_dotenv()
 
@@ -27,9 +28,7 @@ if not OPENAI_API_KEY:
 
 app = FastAPI()
 
-# -------------------------
 # CORS
-# -------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -41,9 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------
 # DATABASE TOKEN HELPERS
-# -------------------------
 def save_token(user_id, token_data):
     session = SessionLocal()
     token_data["created_at"] = datetime.utcnow().isoformat()
@@ -68,9 +65,7 @@ def get_token(user_id):
         return json.loads(token.token_data)
     return None
 
-# -------------------------
 # GOOGLE TOKEN REFRESH
-# -------------------------
 async def get_valid_access_token(user_id):
     token_data = get_token(user_id)
     if not token_data:
@@ -80,7 +75,7 @@ async def get_valid_access_token(user_id):
     expires_in = token_data.get("expires_in", 0)
     refresh_token = token_data.get("refresh_token")
 
-    # Check if token is expired
+    # Refresh if expired
     created_at = datetime.fromisoformat(token_data.get("created_at"))
     if (datetime.utcnow() - created_at).total_seconds() > expires_in - 60 and refresh_token:
         data = {
@@ -99,9 +94,7 @@ async def get_valid_access_token(user_id):
 
     return access_token
 
-# -------------------------
 # GOOGLE OAUTH ROUTES
-# -------------------------
 @app.get("/auth/google_sheets")
 async def auth_google_sheets(user_id: str):
     url = (
@@ -137,18 +130,13 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     user_id = state or "unknown"
     save_token(user_id, token_data)
 
-    # -------------------------
-    # Redirect to latest Integrations page with timestamp to prevent caching
-    # -------------------------
     frontend_redirect = (
         f"https://ai-data-analyst-swart.vercel.app/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
 
-# -------------------------
 # CONNECTED APPS
-# -------------------------
 @app.get("/connected-apps")
 async def connected_apps(user_id: str):
     token_data = get_token(user_id)
@@ -157,9 +145,7 @@ async def connected_apps(user_id: str):
         "google_sheets_last_sync": token_data.get("created_at") if token_data else None
     })
 
-# -------------------------
 # LIST GOOGLE SHEETS
-# -------------------------
 @app.get("/sheets-list/{user_id}")
 async def sheets_list(user_id: str):
     access_token = await get_valid_access_token(user_id)
@@ -178,9 +164,7 @@ async def sheets_list(user_id: str):
     files = resp.json().get("files", [])
     return JSONResponse({"sheets": files})
 
-# -------------------------
 # GET SHEET DATA
-# -------------------------
 @app.get("/sheets/{user_id}/{sheet_id}")
 async def get_sheet_data(user_id: str, sheet_id: str):
     access_token = await get_valid_access_token(user_id)
@@ -198,3 +182,56 @@ async def get_sheet_data(user_id: str, sheet_id: str):
         return JSONResponse({"values": []})
     values = ranges[0].get("values", [])
     return JSONResponse({"values": values})
+
+# --------------------------------------------------------------------
+# 🔥🔥🔥 AI DATA ANALYSIS ENDPOINT (Option 1) 🔥🔥🔥
+# --------------------------------------------------------------------
+# --------------------------------------------------------------------
+# 🔥 AI DATA ANALYSIS ENDPOINT — METRICS BASED 🔥
+# --------------------------------------------------------------------
+local_model = GPT4All("ggml-gpt4all-j-v1.3-groovy")  # adjust model path/name if needed
+
+@app.post("/ai/analyze")
+async def ai_analyze(request: Request):
+    """
+    Analyze data metrics (KPIs, categories) instead of raw rows.
+    Returns structured, actionable insights.
+    """
+    body = await request.json()
+    kpis = body.get("kpis")
+    categories = body.get("categories")
+    row_count = body.get("rowCount", 0)
+
+    if not kpis:
+        return JSONResponse({"error": "No KPIs provided"}, status_code=400)
+
+    # Build a clean prompt for the local AI
+    prompt = f"""
+You are an expert business and financial analyst.
+
+You have the following dataset metrics:
+
+- Total rows: {row_count}
+- KPIs (numeric metrics per column):
+{json.dumps(kpis, indent=2)}
+
+- Categories summary:
+{json.dumps(categories, indent=2)}
+
+Analyze the data and provide:
+1. High-level overview
+2. Trends
+3. What is increasing/decreasing
+4. Cashflow and profitability signals
+5. Anomalies
+6. Risks
+7. Opportunities
+8. Actionable insights to help the business grow
+
+Return your response in a structured format with headings.
+"""
+
+    # Generate local AI response
+    output = local_model.generate(prompt, max_tokens=500)
+
+    return JSONResponse({"analysis": output})
