@@ -192,22 +192,36 @@ async def get_sheet_data(user_id: str, sheet_id: str):
 # --------------------------------------------------------------------
 
 openai.api_key = os.environ.get("OPENAI_API_KEY")
+import openai
+import os
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+# Make sure your OPENAI_API_KEY is set in environment
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise Exception("OPENAI_API_KEY missing")
+openai.api_key = OPENAI_API_KEY
+
 @app.post("/ai/analyze")
 async def ai_analyze(request: Request):
     """
     Analyze data metrics (KPIs, categories) instead of raw rows.
     Returns structured, actionable insights.
     """
-    body = await request.json()
-    kpis = body.get("kpis")
-    categories = body.get("categories")
-    row_count = body.get("rowCount", 0)
+    try:
+        body = await request.json()
+        kpis = body.get("kpis")
+        categories = body.get("categories")
+        row_count = body.get("rowCount", 0)
 
-    if not kpis:
-        return JSONResponse({"error": "No KPIs provided"}, status_code=400)
+        if not kpis:
+            return JSONResponse({"error": "No KPIs provided"}, status_code=400)
 
-    # Build the prompt
-    prompt = f"""
+        # Build prompt
+        prompt = f"""
 You are an expert business and financial analyst.
 
 You have the following dataset metrics:
@@ -232,14 +246,17 @@ Analyze the data and provide:
 Return your response in a structured format with headings.
 """
 
-    try:
+        # Generate response using GPT-3.5 (free tier compatible)
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # <-- Use GPT-3.5 instead of GPT-4
+            model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=500  # safe limit to avoid 500 errors
         )
         output = response.choices[0].message.content
+
         return JSONResponse({"analysis": output})
+
     except Exception as e:
+        print("OpenAI error:", e)  # logs full error in backend
         return JSONResponse({"error": str(e)}, status_code=500)
