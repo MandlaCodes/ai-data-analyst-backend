@@ -294,11 +294,20 @@ async def signup(request: Request):
     email, password = body.get("email"), body.get("password")
     if not email or not password:
         return JSONResponse({"error": "Email and password required"}, status_code=400)
+    
+    # --- FIX: Truncate password to 72 bytes for bcrypt compatibility ---
+    # This prevents the "password cannot be longer than 72 bytes" error.
+    # We encode to bytes, truncate, then decode back.
+    safe_password = password.encode('utf-8')[:72].decode('utf-8', 'ignore')
+    # --- END FIX ---
+    
     session = SessionLocal()
     try:
         if session.query(User).filter(User.email == email).first():
             return JSONResponse({"error": "Email already registered"}, status_code=400)
-        password_hash = User.hash_password(password)
+        
+        # Use the safe_password
+        password_hash = User.hash_password(safe_password)
         new_user = User(email=email, password_hash=password_hash)
         session.add(new_user)
         session.commit()
@@ -400,12 +409,19 @@ async def change_password(request: Request, user: dict = Depends(get_current_use
     new_password = body.get("new_password")
     if not new_password:
         return JSONResponse({"error": "New password required"}, status_code=400)
+        
+    # --- FIX: Truncate password to 72 bytes for bcrypt compatibility ---
+    safe_new_password = new_password.encode('utf-8')[:72].decode('utf-8', 'ignore')
+    # --- END FIX ---
+    
     session = SessionLocal()
     try:
         user_rec = session.query(User).filter(User.id == user["id"]).first()
         if not user_rec:
             return JSONResponse({"error": "User not found"}, status_code=404)
-        user_rec.password_hash = User.hash_password(new_password)
+            
+        # Use the safe_new_password
+        user_rec.password_hash = User.hash_password(safe_new_password)
         session.commit()
         create_audit_log(user["id"], "PASSWORD_CHANGE", ip_address=request.client.host)
         return JSONResponse({"message": "Password change successful"})
