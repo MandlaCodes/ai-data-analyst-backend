@@ -6,3 +6,5 @@ sqlalchemy==2.0.44
 databases==0.9.0
 gpt4all==2.7.0
 requests==2.32.3
+PyJWT==2.8.1
+tqdm==4.67.1
