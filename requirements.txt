@@ -11,3 +11,4 @@ tqdm==4.67.1
 typing-extensions==4.15.0
 passlib
 bcrypt
+psycopg2-binary # <--- ADD THIS LINE
