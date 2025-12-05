@@ -42,7 +42,8 @@ class Dashboard(Base):
     __tablename__ = "dashboards"
     id = Column(String, primary_key=True, index=True) # Unique ID for the dashboard session
     user_id = Column(String, index=True)
-    name = Column(Column(String, default="Untitled Dashboard"))
+    # FIX: Removed the outer Column() wrapper.
+    name = Column(String, default="Untitled Dashboard")
     last_accessed = Column(DateTime, default=datetime.utcnow)
     layout_data = Column(Text) # JSON structure of the dashboard widgets/layout
 
@@ -50,7 +51,8 @@ class Dashboard(Base):
 class AuditLog(Base):
     """Stores security and login events for the user's security page."""
     __tablename__ = "audit_logs"
-    id = Column(Column(String, primary_key=True, default=lambda: os.urandom(16).hex()))
+    # FIX: Removed the outer Column() wrapper.
+    id = Column(String, primary_key=True, default=lambda: os.urandom(16).hex())
     user_id = Column(String, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     event_type = Column(String) # e.g., 'LOGIN_SUCCESS', 'PASSWORD_CHANGE'
