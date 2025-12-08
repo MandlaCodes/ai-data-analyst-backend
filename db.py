@@ -200,3 +200,58 @@ def create_audit_log(user_id, event_type, ip_address="unknown", device_info="unk
         print(f"Error creating audit log: {e}")
     finally:
         session.close()
+
+# ---------------------------
+# SETTINGS & DASHBOARD HELPER FUNCTIONS (ADDED TO FIX IMPORTERROR)
+# ---------------------------
+
+def get_user_settings(user_id):
+    """Retrieves user settings as a dictionary."""
+    session = SessionLocal()
+    try:
+        settings_rec = session.query(Settings).filter(Settings.user_id == user_id).first()
+        if settings_rec and settings_rec.settings_data:
+            return json.loads(settings_rec.settings_data)
+        # Return default settings if none are found
+        return {"theme": "dark", "notifications": True}
+    finally:
+        session.close()
+
+def save_user_settings(user_id, settings_data):
+    """Saves user settings, converting the dictionary to a JSON string."""
+    session = SessionLocal()
+    try:
+        settings_json = json.dumps(settings_data)
+        settings_rec = session.query(Settings).filter(Settings.user_id == user_id).first()
+        if settings_rec:
+            settings_rec.settings_data = settings_json
+        else:
+            settings_rec = Settings(user_id=user_id, settings_data=settings_json)
+            session.add(settings_rec)
+        session.commit()
+        return {"message": "Settings saved successfully"}
+    except Exception as e:
+        session.rollback()
+        print(f"Error saving settings: {e}")
+        # Raising an HTTPException here would be better if this were not a helper function
+        raise # Re-raise to be handled by the caller
+    finally:
+        session.close()
+
+def get_dashboard_sessions_db(user_id):
+    """Retrieves all dashboard entries for a user."""
+    session = SessionLocal()
+    try:
+        dashboards = session.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).all()
+        # Convert ORM objects to a list of dicts for JSON serialization
+        return [
+            {
+                "id": d.id,
+                "name": d.name,
+                "last_accessed": d.last_accessed.isoformat(),
+                "layout_data": json.loads(d.layout_data) if d.layout_data else {}
+            }
+            for d in dashboards
+        ]
+    finally:
+        session.close()
