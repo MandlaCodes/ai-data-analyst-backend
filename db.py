@@ -10,7 +10,7 @@ from passlib.context import CryptContext
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ---------------------------
-# Paths and Engine (CRITICAL UPDATE) 🚀
+# Paths and Engine (CRITICAL UPDATE) 
 # ---------------------------
 
 # Use the DATABASE_URL environment variable for production (Render, etc.)
@@ -23,6 +23,10 @@ connect_args = {}
 if DB_URL:
     # Production: Use the provided URL (e.g., PostgreSQL)
     print(f"Connecting to production database via DATABASE_URL.")
+    # NOTE: PostgreSQL URLs often require ?sslmode=require parameter on platforms like Render
+    # You might need to adjust the DB_URL here if connection fails.
+    if DB_URL.startswith("postgres://") and not "?" in DB_URL:
+        DB_URL += "?sslmode=require"
     pass
 else:
     # Development/Local: Use SQLite
@@ -43,10 +47,12 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
 # ---------------------------
-# Database Models
+# Database Models (FIXED user_id types)
 # ---------------------------
+# The relationship between User.id (Integer) and all other user_id columns 
+# is now consistent (Integer) to prevent SQLAlchemy type errors.
 
-# 0. User Table (CRITICAL ADDITION)
+# 0. User Table
 class User(Base):
     """Stores user accounts for authentication."""
     __tablename__ = "users"
@@ -56,55 +62,60 @@ class User(Base):
     
     @staticmethod
     def hash_password(password: str) -> str:
-        # Hashing function used in main.py
         return pwd_context.hash(password)
 
     def verify_password(self, password: str) -> bool:
-        # Verification function used in main.py
         return pwd_context.verify(password, self.password_hash)
 
-# 1. Token Table (Existing)
+# 1. Token Table
 class Token(Base):
     __tablename__ = "tokens"
-    user_id = Column(String, primary_key=True, index=True)
+    # FIX: Changed from String to Integer to match User.id
+    user_id = Column(Integer, primary_key=True, index=True) 
     token_data = Column(String)
 
-# 2. Settings Table (New)
+# 2. Settings Table
 class Settings(Base):
     """Stores the general application configuration (from Settings.jsx) for a user."""
     __tablename__ = "settings"
-    user_id = Column(String, primary_key=True, index=True)
-    settings_data = Column(String) # Stores the JSON payload of all settings
+    # FIX: Changed from String to Integer to match User.id
+    user_id = Column(Integer, primary_key=True, index=True) 
+    settings_data = Column(String) 
 
-# 3. Dashboard Table (New)
+# 3. Dashboard Table
 class Dashboard(Base):
     """Stores individual dashboard layouts/sessions for a user."""
     __tablename__ = "dashboards"
-    # Use Integer for primary key if possible, but keeping String as in original for now
+    # Keeping id as String UUID/hash is fine.
     id = Column(String, primary_key=True, index=True, default=lambda: os.urandom(16).hex()) 
-    user_id = Column(String, index=True)
+    # FIX: Changed from String to Integer to match User.id
+    user_id = Column(Integer, index=True) 
     name = Column(String, default="Untitled Dashboard")
     last_accessed = Column(DateTime, default=datetime.utcnow)
-    layout_data = Column(Text) # JSON structure of the dashboard widgets/layout
+    layout_data = Column(Text) 
 
-# 4. AuditLog Table (New)
+# 4. AuditLog Table
 class AuditLog(Base):
     """Stores security and login events for the user's security page."""
     __tablename__ = "audit_logs"
     id = Column(String, primary_key=True, default=lambda: os.urandom(16).hex())
-    user_id = Column(String, index=True)
+    # FIX: Changed from String to Integer to match User.id
+    user_id = Column(Integer, index=True) 
     timestamp = Column(DateTime, default=datetime.utcnow)
-    event_type = Column(String) # e.g., 'LOGIN_SUCCESS', 'PASSWORD_CHANGE'
+    event_type = Column(String) 
     ip_address = Column(String)
     device_info = Column(String)
     is_suspicious = Column(Boolean, default=False)
 
 
 # Create tables automatically if they don't exist
+# NOTE: If you are moving from a SQLite database to a new PostgreSQL database 
+# with existing tables, you will need to DROP the old tables for the new 
+# schema to apply correctly on the first run, or use Alembic migrations.
 Base.metadata.create_all(engine)
 
 # ---------------------------
-# Helper functions (Updated and Extended)
+# Helper functions (Updated for Integer user_id)
 # ---------------------------
 
 # --- NEW DASHBOARD HELPER (Required for first-time signups) ---
@@ -112,15 +123,13 @@ def create_default_dashboard(user_id: int, dashboard_name="Getting Started Dashb
     """Creates a basic dashboard entry for a new user."""
     session = SessionLocal()
     try:
-        # Define a simple, empty layout JSON
         default_layout_data = json.dumps({
             "widgets": [],
             "message": "Welcome! Click here to import your first dataset."
         })
         
-        # Create a new Dashboard record
         dashboard_entry = Dashboard(
-            user_id=str(user_id), # Ensure user_id is converted to String to match the Dashboard model
+            user_id=user_id, # user_id is now passed directly as int
             name=dashboard_name,
             layout_data=default_layout_data,
             last_accessed=datetime.utcnow()
