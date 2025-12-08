@@ -9,12 +9,12 @@ from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from starlette.responses import Response # <-- Import Response for generic handler
+from starlette.responses import Response 
 
 import httpx
 import jwt
 
-# DB imports (UPDATED to include create_default_dashboard)
+# DB imports
 from db import (
     SessionLocal, Token, Settings, Dashboard, AuditLog, 
     create_audit_log, User, create_default_dashboard 
@@ -39,7 +39,8 @@ SCOPES = os.environ.get(
     "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly"
 )
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "replace_with_strong_secret")
+# IMPORTANT: Ensure JWT_SECRET is set in Render Env Vars for security!
+JWT_SECRET = os.environ.get("JWT_SECRET", "replace_with_strong_secret") 
 JWT_ALG = "HS256"
 JWT_EXPIRE_DAYS = int(os.environ.get("JWT_EXPIRE_DAYS", "30"))
 
@@ -57,21 +58,21 @@ def get_db():
 
 
 # -----------------------
-# CORS (CRITICAL FIX: ADDED YOUR NEW VERIFIED VERCEL URL)
+# CORS Configuration (CRITICAL FINAL FIX FOR DEPLOYMENT)
 # -----------------------
-# Frontend production URL: https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        # Old/placeholder URL:
         "https://ai-data-analyst-swart.vercel.app", 
         # 🟢 YOUR CURRENT, CORRECT DEPLOYED FRONTEND URL 🟢
         "https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app"
     ],
-    allow_credentials=True,
+    # CRITICAL: Must be True to allow Authorization header
+    allow_credentials=True, 
     allow_methods=["*"],
-    allow_headers=["*"],
+    # CRITICAL: Must explicitly allow the Authorization header for JWTs
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # -----------------------
@@ -136,92 +137,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 # -----------------------
 # DATABASE HELPERS 
 # -----------------------
-def save_token(user_id, token_data):
-    # This helper is called by auth_callback where dependency injection is not used.
-    session = SessionLocal()
-    token_data["created_at"] = datetime.utcnow().isoformat()
-    data_json = json.dumps(token_data)
-    try:
-        # Note: user_id is expected to be an Integer here, matching the DB fix
-        token = session.query(Token).filter(Token.user_id == user_id).first()
-        if token:
-            token.token_data = data_json
-        else:
-            token = Token(user_id=user_id, token_data=data_json)
-            session.add(token)
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        print(f"Error saving token: {e}")
-    finally:
-        session.close()
-
-def get_token(user_id):
-    session = SessionLocal()
-    try:
-        token = session.query(Token).filter(Token.user_id == user_id).first()
-        if token:
-            return json.loads(token.token_data)
-        return None
-    finally:
-        session.close()
-
-def get_user_settings(user_id):
-    session = SessionLocal()
-    try:
-        settings_record = session.query(Settings).filter(Settings.user_id == user_id).first()
-        if settings_record:
-            return json.loads(settings_record.settings_data)
-        return {
-            "defaultSource": "Google Sheets",
-            "analysisRefreshInterval": 300,
-            "enablePointerCursor": True,
-            "reduceMotion": False,
-        }
-    except Exception as e:
-        print(f"Error retrieving settings for {user_id}: {e}")
-        return {}
-    finally:
-        session.close()
-
-def save_user_settings(user_id, settings_data):
-    session = SessionLocal()
-    data_json = json.dumps(settings_data)
-    try:
-        settings_record = session.query(Settings).filter(Settings.user_id == user_id).first()
-        if settings_record:
-            settings_record.settings_data = data_json
-        else:
-            settings_record = Settings(user_id=user_id, settings_data=data_json)
-            session.add(settings_record)
-        session.commit()
-        return {"message": "Settings saved successfully"}
-    except Exception as e:
-        session.rollback()
-        print(f"Database error during settings save: {e}")
-        raise e
-    finally:
-        session.close()
-
-def get_dashboard_sessions_db(user_id):
-    session = SessionLocal()
-    try:
-        sessions = session.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).all()
-        return [
-            {
-                "id": dash.id,
-                "name": dash.name,
-                "last_accessed": dash.last_accessed.isoformat() if dash.last_accessed else None,
-                "layout_preview": f"Widgets: {len(json.loads(dash.layout_data).get('widgets', []))}",
-                "is_current": (sessions.index(dash) == 0)
-            }
-            for dash in sessions
-        ]
-    except Exception as e:
-        print(f"Error retrieving dashboard sessions for {user_id}: {e}")
-        return []
-    finally:
-        session.close()
+from db import save_token, get_token, get_user_settings, save_user_settings, get_dashboard_sessions_db # Importing helpers from db.py
 
 # -----------------------
 # GOOGLE TOKEN REFRESH
@@ -303,7 +219,7 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         pass
         
     frontend_redirect = (
-        # Redirect URL must match one of the allowed CORS origins if it handles tokens
+        # Redirect URL must match one of the allowed CORS origins
         f"https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
@@ -364,7 +280,7 @@ async def signup(request: Request, db_session: Session = Depends(get_db)):
     if not email or not password:
         return JSONResponse({"error": "Email and password required"}, status_code=400)
     
-    # --- FIX: Truncate password to 72 bytes for bcrypt compatibility ---
+    # --- Truncate password to 72 bytes for bcrypt compatibility ---
     safe_password = password.encode('utf-8')[:72].decode('utf-8', 'ignore')
     # --- END FIX ---
     
@@ -474,7 +390,7 @@ async def change_password(request: Request, user: dict = Depends(get_current_use
     if not new_password:
         return JSONResponse({"error": "New password required"}, status_code=400)
     
-    # --- FIX: Truncate password to 72 bytes for bcrypt compatibility ---
+    # --- Truncate password to 72 bytes for bcrypt compatibility ---
     safe_new_password = new_password.encode('utf-8')[:72].decode('utf-8', 'ignore')
     # --- END FIX ---
     
