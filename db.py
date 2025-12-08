@@ -23,8 +23,6 @@ connect_args = {}
 if DB_URL:
     # Production: Use the provided URL (e.g., PostgreSQL)
     print(f"Connecting to production database via DATABASE_URL.")
-    # For Render/Postgres, we often need to ensure the dialect is correctly specified, 
-    # but create_engine usually handles it if the URL starts with 'postgresql://'
     pass
 else:
     # Development/Local: Use SQLite
@@ -108,6 +106,35 @@ Base.metadata.create_all(engine)
 # ---------------------------
 # Helper functions (Updated and Extended)
 # ---------------------------
+
+# --- NEW DASHBOARD HELPER (Required for first-time signups) ---
+def create_default_dashboard(user_id: int, dashboard_name="Getting Started Dashboard"):
+    """Creates a basic dashboard entry for a new user."""
+    session = SessionLocal()
+    try:
+        # Define a simple, empty layout JSON
+        default_layout_data = json.dumps({
+            "widgets": [],
+            "message": "Welcome! Click here to import your first dataset."
+        })
+        
+        # Create a new Dashboard record
+        dashboard_entry = Dashboard(
+            user_id=str(user_id), # Ensure user_id is converted to String to match the Dashboard model
+            name=dashboard_name,
+            layout_data=default_layout_data,
+            last_accessed=datetime.utcnow()
+        )
+        
+        session.add(dashboard_entry)
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        print(f"Error creating default dashboard for user {user_id}: {e}")
+        return False
+    finally:
+        session.close()
 
 # --- Token Helpers (Existing) ---
 def save_token(user_id, token_data):
