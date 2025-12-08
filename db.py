@@ -1,4 +1,3 @@
-# src/db.py
 import os
 import json
 from datetime import datetime
@@ -10,7 +9,7 @@ from passlib.context import CryptContext
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ---------------------------
-# Paths and Engine 
+# Paths and Engine (CRITICAL UPDATE FOR STABILITY)
 # ---------------------------
 
 # Use the DATABASE_URL environment variable for production (Render, etc.)
@@ -39,7 +38,12 @@ else:
 
 engine = create_engine(
     DB_URL,
-    connect_args=connect_args
+    connect_args=connect_args,
+    # 🟢 CRITICAL FIXES FOR PRODUCTION DATABASE RELIABILITY 🟢
+    pool_pre_ping=True,      # Checks connection validity before using it
+    pool_recycle=3600,       # Recycles connections after 1 hour (common cloud DB timeout)
+    pool_size=10,            # Defines the connection pool size
+    max_overflow=20          # Defines how many connections can be created above pool_size
 )
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
