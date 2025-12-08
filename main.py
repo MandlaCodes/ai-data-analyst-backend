@@ -17,9 +17,7 @@ import jwt
 # DB imports
 from db import (
     SessionLocal, Token, Settings, Dashboard, AuditLog, 
-    create_audit_log, User, create_default_dashboard,
-    # CRITICAL FIX: Ensure all required helpers are imported
-    get_user_settings, save_user_settings, get_dashboard_sessions_db 
+    create_audit_log, User, create_default_dashboard 
 )
 
 # Local AI model
@@ -137,9 +135,9 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
 
 # -----------------------
-# DATABASE HELPERS (REMOVED REDUNDANT IMPORTS)
+# DATABASE HELPERS 
 # -----------------------
-# from db import save_token, get_token, get_user_settings, save_user_settings, get_dashboard_sessions_db # Importing helpers from db.py
+from db import save_token, get_token, get_user_settings, save_user_settings, get_dashboard_sessions_db # Importing helpers from db.py
 
 # -----------------------
 # GOOGLE TOKEN REFRESH
@@ -170,13 +168,8 @@ async def get_valid_access_token(user_id):
         async with httpx.AsyncClient() as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=data)
             new_token = resp.json()
-            # Handle case where refresh_token might not be returned (usually not, but safe)
-            if "refresh_token" not in new_token and refresh_token:
-                new_token["refresh_token"] = refresh_token
-                
             token_data["access_token"] = new_token.get("access_token", access_token)
             token_data["expires_in"] = new_token.get("expires_in", 3600)
-            token_data["created_at"] = datetime.utcnow().isoformat() # Update timestamp
             save_token(user_id, token_data)
             access_token = token_data["access_token"]
     return access_token
@@ -212,18 +205,13 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.post("https://oauth2.googleapis.com/token", data=data)
         token_data = resp.json()
-        
     user_id = state or "unknown"
-    # Ensure user_id is cast to int for DB helpers
+    # Ensure user_id is cast to int for DB helpers if it came from the JWT flow
     try:
         user_id_int = int(user_id)
     except ValueError:
-        # If user_id isn't a simple integer, handle as the string it is, though this is discouraged
-        user_id_int = user_id 
+        user_id_int = user_id # Keep as string if it's from Google's state payload
         
-    # Add timestamp before saving
-    token_data["created_at"] = datetime.utcnow().isoformat()
-
     save_token(user_id_int, token_data)
     try:
         create_audit_log(user_id_int, "INTEGRATION_GOOGLE_SUCCESS", ip_address=request.client.host)
@@ -231,9 +219,8 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         pass
         
     frontend_redirect = (
-        # 🔴 CRITICAL FIX IMPLEMENTED HERE 🔴
-        # Redirect URL now points to the correct nested path in the frontend router
-        f"https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app/dashboard/integrations"
+        # Redirect URL must match one of the allowed CORS origins
+        f"https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
@@ -275,8 +262,7 @@ async def get_sheet_data(sheet_id: str, user: dict = Depends(get_current_user)):
     if not access_token:
         return JSONResponse({"error": "Google Sheets not connected"}, status_code=400)
     headers = {"Authorization": f"Bearer {access_token}"}
-    # Note: Only fetches Sheet1 data for now
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values:batchGet?ranges=Sheet1" 
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values:batchGet?ranges=Sheet1"
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, headers=headers)
     data = resp.json()
