@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session # <-- NEW: Import Session for dependency injection
+from sqlalchemy.orm import Session # <-- Import Session for dependency injection
 
 import httpx
 import jwt
@@ -16,7 +16,7 @@ import jwt
 # DB imports (UPDATED to include create_default_dashboard)
 from db import (
     SessionLocal, Token, Settings, Dashboard, AuditLog, 
-    create_audit_log, User, create_default_dashboard # <-- NEW IMPORT
+    create_audit_log, User, create_default_dashboard 
 )
 
 # Local AI model
@@ -70,6 +70,17 @@ app.add_middleware(
 )
 
 # -----------------------
+# CORS Pre-flight Fix
+# -----------------------
+# This explicitly handles the OPTIONS request used by the browser's CORS pre-flight,
+# preventing the request from hitting your route handlers and failing on body parsing.
+@app.options("/{full_path:path}")
+async def options_handler():
+    # Returning a 204 No Content response is the standard way to handle a successful pre-flight.
+    return JSONResponse(status_code=204)
+
+
+# -----------------------
 # JWT helpers & dependency
 # -----------------------
 security = HTTPBearer()
@@ -108,10 +119,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except Exception as e:
         print(f"Error getting user: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during authentication")
-    # Note: db_session is closed by the dependency injection `get_db`
+
 
 # -----------------------
-# DATABASE HELPERS (Updated to use SessionLocal internally where dependency injection is not possible)
+# DATABASE HELPERS (Using SessionLocal internally where dependency injection is not possible)
 # -----------------------
 def save_token(user_id, token_data):
     # This helper is called by auth_callback where dependency injection is tricky due to RedirectResponse
@@ -330,7 +341,7 @@ async def get_sheet_data(sheet_id: str, user: dict = Depends(get_current_user)):
 # AUTH ROUTES (SIGNUP / LOGIN / ME)
 # -----------------------
 @app.post("/auth/signup")
-async def signup(request: Request, db_session: Session = Depends(get_db)): # <-- UPDATED: Use DB dependency
+async def signup(request: Request, db_session: Session = Depends(get_db)):
     body = await request.json()
     email, password = body.get("email"), body.get("password")
     if not email or not password:
@@ -351,8 +362,7 @@ async def signup(request: Request, db_session: Session = Depends(get_db)): # <--
         db_session.commit()
         db_session.refresh(new_user)
         
-        # 2. CREATE DEFAULT DASHBOARD FOR NEW USER (CRITICAL ADDITION)
-        # Note: create_default_dashboard handles its own SessionLocal to avoid cross-session issues
+        # 2. CREATE DEFAULT DASHBOARD FOR NEW USER
         create_default_dashboard(user_id=new_user.id) 
 
         # 3. Create the JWT token and audit log
@@ -363,10 +373,9 @@ async def signup(request: Request, db_session: Session = Depends(get_db)): # <--
         db_session.rollback()
         print("Signup error:", e)
         return JSONResponse({"error": "Signup failed"}, status_code=500)
-    # db_session is closed by the dependency injection `get_db`
 
 @app.post("/auth/login")
-async def login(request: Request, db_session: Session = Depends(get_db)): # <-- UPDATED: Use DB dependency
+async def login(request: Request, db_session: Session = Depends(get_db)):
     body = await request.json()
     email, password = body.get("email"), body.get("password")
     if not email or not password:
@@ -381,7 +390,6 @@ async def login(request: Request, db_session: Session = Depends(get_db)): # <-- 
     except Exception as e:
         print("Login error:", e)
         return JSONResponse({"error": "Login failed"}, status_code=500)
-    # db_session is closed by the dependency injection `get_db`
 
 @app.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
@@ -423,7 +431,7 @@ async def get_dashboard_sessions_endpoint(user: dict = Depends(get_current_user)
     return JSONResponse({"sessions": sessions})
 
 @app.post("/api/dashboard/save")
-async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)): # <-- UPDATED: Use DB dependency
+async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
     body = await request.json()
     name, layout = body.get("name", "Untitled Dashboard"), body.get("layout", {})
     try:
@@ -437,13 +445,12 @@ async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_cur
         db_session.rollback()
         print("Save dashboard error:", e)
         return JSONResponse({"error": "Failed to save dashboard"}, status_code=500)
-    # db_session is closed by the dependency injection `get_db`
 
 # -----------------------
 # SECURITY ENDPOINTS
 # -----------------------
 @app.post("/api/security/change-password")
-async def change_password(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)): # <-- UPDATED: Use DB dependency
+async def change_password(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
     body = await request.json()
     new_password = body.get("new_password")
     if not new_password:
@@ -457,7 +464,7 @@ async def change_password(request: Request, user: dict = Depends(get_current_use
         user_rec = db_session.query(User).filter(User.id == user["id"]).first()
         if not user_rec:
             return JSONResponse({"error": "User not found"}, status_code=404)
-        
+            
         # Use the safe_new_password
         user_rec.password_hash = User.hash_password(safe_new_password)
         db_session.commit()
@@ -467,7 +474,6 @@ async def change_password(request: Request, user: dict = Depends(get_current_use
         db_session.rollback()
         print("Password change error:", e)
         return JSONResponse({"error": "Failed to change password"}, status_code=500)
-    # db_session is closed by the dependency injection `get_db`
 
 @app.post("/api/security/toggle-2fa")
 async def toggle_2fa_mock(request: Request, user: dict = Depends(get_current_user)):
@@ -478,7 +484,7 @@ async def toggle_2fa_mock(request: Request, user: dict = Depends(get_current_use
     return JSONResponse({"message": f"2FA status set to {is_enabled} (Simulated)."})
 
 @app.get("/api/security/logins")
-async def get_recent_logins_endpoint(user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)): # <-- UPDATED: Use DB dependency
+async def get_recent_logins_endpoint(user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
     try:
         logs = db_session.query(AuditLog).filter(AuditLog.user_id == user["id"]).order_by(AuditLog.timestamp.desc()).limit(10).all()
         formatted_logs = [
@@ -491,7 +497,6 @@ async def get_recent_logins_endpoint(user: dict = Depends(get_current_user), db_
     except Exception as e:
         print(f"Error retrieving audit logs: {e}")
         return JSONResponse({"error": "Failed to retrieve logs"}, status_code=500)
-    # db_session is closed by the dependency injection `get_db`
 
 # -----------------------
 # GPT4ALL AI MODEL
