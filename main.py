@@ -8,12 +8,17 @@ from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.orm import Session
+from starlette.responses import Response # <-- Import Response for generic handler
 
 import httpx
 import jwt
 
-# DB imports
-from db import SessionLocal, Token, Settings, Dashboard, AuditLog, create_audit_log, User
+# DB imports (UPDATED to include create_default_dashboard)
+from db import (
+    SessionLocal, Token, Settings, Dashboard, AuditLog, 
+    create_audit_log, User, create_default_dashboard 
+)
 
 # Local AI model
 from gpt4all import GPT4All
@@ -41,18 +46,51 @@ JWT_EXPIRE_DAYS = int(os.environ.get("JWT_EXPIRE_DAYS", "30"))
 app = FastAPI()
 
 # -----------------------
-# CORS
+# Dependency to get DB session
 # -----------------------
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# -----------------------
+# CORS (CRITICAL FIX: ADDED YOUR NEW VERIFIED VERCEL URL)
+# -----------------------
+# Frontend production URL: https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://ai-data-analyst-swart.vercel.app"
+        # Old/placeholder URL:
+        "https://ai-data-analyst-swart.vercel.app", 
+        # 🟢 YOUR CURRENT, CORRECT DEPLOYED FRONTEND URL 🟢
+        "https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -----------------------
+# CORS Pre-flight Fix 
+# -----------------------
+@app.options("/{full_path:path}")
+async def preflight_handler(response: Response):
+    # This handler ensures the browser's OPTIONS request gets a 204 No Content response
+    # with the correct CORS headers attached by the middleware above.
+    return Response(status_code=204) 
+
+# -----------------------
+# HEALTH CHECK (For Render's stability)
+# -----------------------
+@app.get("/")
+def health_check():
+    """Simple route for Render/load balancers to check service health."""
+    return {"status": "ok", "service": "AI Data Analyst Backend"}
+
 
 # -----------------------
 # JWT helpers & dependency
@@ -75,43 +113,58 @@ def decode_jwt(token: str):
     except Exception:
         return None
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db_session: Session = Depends(get_db)):
     token = credentials.credentials
     payload = decode_jwt(token)
     if not payload or "user_id" not in payload:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    session = SessionLocal()
+    
     try:
-        user = session.query(User).filter(User.id == payload["user_id"]).first()
+        # Use the injected db_session
+        user = db_session.query(User).filter(User.id == payload["user_id"]).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         return {"id": user.id, "email": user.email}
-    finally:
-        session.close()
+    except HTTPException:
+        # Re-raise explicit HTTP exceptions
+        raise
+    except Exception as e:
+        print(f"Error getting user: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error during authentication")
+
 
 # -----------------------
-# DATABASE HELPERS
+# DATABASE HELPERS 
 # -----------------------
 def save_token(user_id, token_data):
+    # This helper is called by auth_callback where dependency injection is not used.
     session = SessionLocal()
     token_data["created_at"] = datetime.utcnow().isoformat()
     data_json = json.dumps(token_data)
-    token = session.query(Token).filter(Token.user_id == user_id).first()
-    if token:
-        token.token_data = data_json
-    else:
-        token = Token(user_id=user_id, token_data=data_json)
-        session.add(token)
-    session.commit()
-    session.close()
+    try:
+        # Note: user_id is expected to be an Integer here, matching the DB fix
+        token = session.query(Token).filter(Token.user_id == user_id).first()
+        if token:
+            token.token_data = data_json
+        else:
+            token = Token(user_id=user_id, token_data=data_json)
+            session.add(token)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        print(f"Error saving token: {e}")
+    finally:
+        session.close()
 
 def get_token(user_id):
     session = SessionLocal()
-    token = session.query(Token).filter(Token.user_id == user_id).first()
-    session.close()
-    if token:
-        return json.loads(token.token_data)
-    return None
+    try:
+        token = session.query(Token).filter(Token.user_id == user_id).first()
+        if token:
+            return json.loads(token.token_data)
+        return None
+    finally:
+        session.close()
 
 def get_user_settings(user_id):
     session = SessionLocal()
@@ -180,7 +233,15 @@ async def get_valid_access_token(user_id):
     access_token = token_data.get("access_token")
     expires_in = token_data.get("expires_in", 0)
     refresh_token = token_data.get("refresh_token")
-    created_at = datetime.fromisoformat(token_data.get("created_at"))
+    
+    # Safely handle created_at string
+    created_at_str = token_data.get("created_at")
+    try:
+        created_at = datetime.fromisoformat(created_at_str)
+    except (TypeError, ValueError):
+        # Fallback for old/missing data
+        created_at = datetime.utcnow() - timedelta(seconds=expires_in + 1)
+
     if (datetime.utcnow() - created_at).total_seconds() > expires_in - 60 and refresh_token:
         data = {
             "client_id": CLIENT_ID,
@@ -191,10 +252,10 @@ async def get_valid_access_token(user_id):
         async with httpx.AsyncClient() as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=data)
             new_token = resp.json()
-            token_data["access_token"] = new_token["access_token"]
+            token_data["access_token"] = new_token.get("access_token", access_token)
             token_data["expires_in"] = new_token.get("expires_in", 3600)
             save_token(user_id, token_data)
-            access_token = new_token["access_token"]
+            access_token = token_data["access_token"]
     return access_token
 
 # -----------------------
@@ -229,13 +290,21 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         resp = await http_client.post("https://oauth2.googleapis.com/token", data=data)
         token_data = resp.json()
     user_id = state or "unknown"
-    save_token(user_id, token_data)
+    # Ensure user_id is cast to int for DB helpers if it came from the JWT flow
     try:
-        create_audit_log(user_id, "INTEGRATION_GOOGLE_SUCCESS", ip_address=request.client.host)
+        user_id_int = int(user_id)
+    except ValueError:
+        user_id_int = user_id # Keep as string if it's from Google's state payload
+        
+    save_token(user_id_int, token_data)
+    try:
+        create_audit_log(user_id_int, "INTEGRATION_GOOGLE_SUCCESS", ip_address=request.client.host)
     except Exception:
         pass
+        
     frontend_redirect = (
-        f"https://ai-data-analyst-swart.vercel.app/integrations"
+        # Redirect URL must match one of the allowed CORS origins if it handles tokens
+        f"https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
@@ -289,48 +358,47 @@ async def get_sheet_data(sheet_id: str, user: dict = Depends(get_current_user)):
 # AUTH ROUTES (SIGNUP / LOGIN / ME)
 # -----------------------
 @app.post("/auth/signup")
-async def signup(request: Request):
+async def signup(request: Request, db_session: Session = Depends(get_db)):
     body = await request.json()
     email, password = body.get("email"), body.get("password")
     if not email or not password:
         return JSONResponse({"error": "Email and password required"}, status_code=400)
     
     # --- FIX: Truncate password to 72 bytes for bcrypt compatibility ---
-    # This prevents the "password cannot be longer than 72 bytes" error.
-    # We encode to bytes, truncate, then decode back.
     safe_password = password.encode('utf-8')[:72].decode('utf-8', 'ignore')
     # --- END FIX ---
     
-    session = SessionLocal()
     try:
-        if session.query(User).filter(User.email == email).first():
+        if db_session.query(User).filter(User.email == email).first():
             return JSONResponse({"error": "Email already registered"}, status_code=400)
         
-        # Use the safe_password
+        # 1. Create the new user record
         password_hash = User.hash_password(safe_password)
         new_user = User(email=email, password_hash=password_hash)
-        session.add(new_user)
-        session.commit()
-        session.refresh(new_user)
+        db_session.add(new_user)
+        db_session.commit()
+        db_session.refresh(new_user)
+        
+        # 2. CREATE DEFAULT DASHBOARD FOR NEW USER (user_id is int)
+        create_default_dashboard(user_id=new_user.id) 
+
+        # 3. Create the JWT token and audit log
         token = create_jwt(new_user.id)
         create_audit_log(new_user.id, "SIGNUP", ip_address=request.client.host)
         return JSONResponse({"message": "Signup successful", "token": token, "user_id": new_user.id})
     except Exception as e:
-        session.rollback()
+        db_session.rollback()
         print("Signup error:", e)
         return JSONResponse({"error": "Signup failed"}, status_code=500)
-    finally:
-        session.close()
 
 @app.post("/auth/login")
-async def login(request: Request):
+async def login(request: Request, db_session: Session = Depends(get_db)):
     body = await request.json()
     email, password = body.get("email"), body.get("password")
     if not email or not password:
         return JSONResponse({"error": "Email and password required"}, status_code=400)
-    session = SessionLocal()
     try:
-        user = session.query(User).filter(User.email == email).first()
+        user = db_session.query(User).filter(User.email == email).first()
         if not user or not user.verify_password(password):
             return JSONResponse({"error": "Invalid email or password"}, status_code=401)
         token = create_jwt(user.id)
@@ -339,8 +407,6 @@ async def login(request: Request):
     except Exception as e:
         print("Login error:", e)
         return JSONResponse({"error": "Login failed"}, status_code=500)
-    finally:
-        session.close()
 
 @app.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
@@ -382,55 +448,50 @@ async def get_dashboard_sessions_endpoint(user: dict = Depends(get_current_user)
     return JSONResponse({"sessions": sessions})
 
 @app.post("/api/dashboard/save")
-async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_current_user)):
+async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
     body = await request.json()
     name, layout = body.get("name", "Untitled Dashboard"), body.get("layout", {})
-    session_db = SessionLocal()
     try:
+        # user["id"] is already an integer from the JWT payload
         new_dash = Dashboard(user_id=user["id"], name=name, layout_data=json.dumps(layout), last_accessed=datetime.utcnow())
-        session_db.add(new_dash)
-        session_db.commit()
-        session_db.refresh(new_dash)
+        db_session.add(new_dash)
+        db_session.commit()
+        db_session.refresh(new_dash)
         create_audit_log(user["id"], "DASHBOARD_SAVE", ip_address=request.client.host)
         return JSONResponse({"message": "Dashboard saved", "id": new_dash.id})
     except Exception as e:
-        session_db.rollback()
+        db_session.rollback()
         print("Save dashboard error:", e)
         return JSONResponse({"error": "Failed to save dashboard"}, status_code=500)
-    finally:
-        session_db.close()
 
 # -----------------------
 # SECURITY ENDPOINTS
 # -----------------------
 @app.post("/api/security/change-password")
-async def change_password(request: Request, user: dict = Depends(get_current_user)):
+async def change_password(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
     body = await request.json()
     new_password = body.get("new_password")
     if not new_password:
         return JSONResponse({"error": "New password required"}, status_code=400)
-        
+    
     # --- FIX: Truncate password to 72 bytes for bcrypt compatibility ---
     safe_new_password = new_password.encode('utf-8')[:72].decode('utf-8', 'ignore')
     # --- END FIX ---
     
-    session = SessionLocal()
     try:
-        user_rec = session.query(User).filter(User.id == user["id"]).first()
+        user_rec = db_session.query(User).filter(User.id == user["id"]).first()
         if not user_rec:
             return JSONResponse({"error": "User not found"}, status_code=404)
             
         # Use the safe_new_password
         user_rec.password_hash = User.hash_password(safe_new_password)
-        session.commit()
+        db_session.commit()
         create_audit_log(user["id"], "PASSWORD_CHANGE", ip_address=request.client.host)
         return JSONResponse({"message": "Password change successful"})
     except Exception as e:
-        session.rollback()
+        db_session.rollback()
         print("Password change error:", e)
         return JSONResponse({"error": "Failed to change password"}, status_code=500)
-    finally:
-        session.close()
 
 @app.post("/api/security/toggle-2fa")
 async def toggle_2fa_mock(request: Request, user: dict = Depends(get_current_user)):
@@ -441,10 +502,9 @@ async def toggle_2fa_mock(request: Request, user: dict = Depends(get_current_use
     return JSONResponse({"message": f"2FA status set to {is_enabled} (Simulated)."})
 
 @app.get("/api/security/logins")
-async def get_recent_logins_endpoint(user: dict = Depends(get_current_user)):
-    session = SessionLocal()
+async def get_recent_logins_endpoint(user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
     try:
-        logs = session.query(AuditLog).filter(AuditLog.user_id == user["id"]).order_by(AuditLog.timestamp.desc()).limit(10).all()
+        logs = db_session.query(AuditLog).filter(AuditLog.user_id == user["id"]).order_by(AuditLog.timestamp.desc()).limit(10).all()
         formatted_logs = [
             {"id": log.id, "event": log.event_type, "time": log.timestamp.isoformat(),
              "location": f"IP: {log.ip_address}", "device": log.device_info or "Web Browser",
@@ -452,8 +512,9 @@ async def get_recent_logins_endpoint(user: dict = Depends(get_current_user)):
             for log in logs if log.event_type.startswith("LOGIN") or log.event_type.startswith("PASSWORD")
         ]
         return JSONResponse(formatted_logs)
-    finally:
-        session.close()
+    except Exception as e:
+        print(f"Error retrieving audit logs: {e}")
+        return JSONResponse({"error": "Failed to retrieve logs"}, status_code=500)
 
 # -----------------------
 # GPT4ALL AI MODEL
