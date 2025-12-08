@@ -8,7 +8,8 @@ from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session # <-- Import Session for dependency injection
+from sqlalchemy.orm import Session
+from starlette.responses import Response # <-- NEW: Import Response for generic handler
 
 import httpx
 import jwt
@@ -70,14 +71,15 @@ app.add_middleware(
 )
 
 # -----------------------
-# CORS Pre-flight Fix
+# CORS Pre-flight Fix (The fix for 400 Bad Request on OPTIONS)
 # -----------------------
-# This explicitly handles the OPTIONS request used by the browser's CORS pre-flight,
-# preventing the request from hitting your route handlers and failing on body parsing.
 @app.options("/{full_path:path}")
-async def options_handler():
-    # Returning a 204 No Content response is the standard way to handle a successful pre-flight.
-    return JSONResponse(status_code=204)
+async def preflight_handler(response: Response):
+    # This explicit handler catches all OPTIONS requests.
+    # It allows the CORSMiddleware to attach the necessary headers 
+    # and return a 204 No Content response without hitting any route logic, 
+    # which prevents the 400 error caused by trying to parse a request body.
+    return Response(status_code=204) # 
 
 
 # -----------------------
