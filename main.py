@@ -217,7 +217,7 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         
     frontend_redirect = (
         # 🟢 UPDATED: Redirect URL now uses the new domain 🟢
-        f"https://twinix.vercel.app/dashboard/integrations"
+        f"http://localhost:3000/dashboard/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
