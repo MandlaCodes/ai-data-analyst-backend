@@ -58,15 +58,14 @@ def get_db():
 
 
 # -----------------------
-# CORS Configuration (CRITICAL FINAL FIX FOR DEPLOYMENT)
+# CORS Configuration (Updated with new domain: twinix.vercel.app)
 # -----------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://ai-data-analyst-swart.vercel.app", 
-        # 🟢 YOUR CURRENT, CORRECT DEPLOYED FRONTEND URL 🟢
-        "https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app"
+        # 🟢 UPDATED: Using the new, clean base domain 🟢
+        "https://twinix.vercel.app", 
     ],
     # CRITICAL: Must be True to allow Authorization header
     allow_credentials=True, 
@@ -75,9 +74,7 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# -----------------------
-# CORS Pre-flight Fix 
-# -----------------------
+
 @app.options("/{full_path:path}")
 async def preflight_handler(response: Response):
     # This handler ensures the browser's OPTIONS request gets a 204 No Content response
@@ -219,8 +216,8 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         pass
         
     frontend_redirect = (
-        # Redirect URL must match one of the allowed CORS origins
-        f"https://ai-data-analyst-mlmhlw72c-mandlas-projects-228bb82e.vercel.app/integrations"
+        # 🟢 UPDATED: Redirect URL now uses the new domain 🟢
+        f"https://twinix.vercel.app/dashboard/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
