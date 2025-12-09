@@ -65,7 +65,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         # 🟢 UPDATED: Using the new, clean base domain 🟢
-        "https://twinix.vercel.app", 
+        "https://aianalyst-gamma.vercel.app/", 
     ],
     # CRITICAL: Must be True to allow Authorization header
     allow_credentials=True, 
@@ -217,7 +217,7 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         
     frontend_redirect = (
         # 🟢 UPDATED: Redirect URL now uses the new domain 🟢
-        f"https://twinix.vercel.app/dashboard/integrations"
+        f"https://aianalyst-gamma.vercel.app/dashboard/integrations"
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
