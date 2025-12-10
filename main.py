@@ -1,4 +1,4 @@
-# src/main.py
+# src/main.py (FINAL, CORRECTED VERSION for Render Deployment)
 import os
 import json
 import asyncio
@@ -15,14 +15,19 @@ from starlette.responses import Response
 import httpx
 import jwt
 
-# DB imports
+# DB imports (Assuming these are in your project structure)
 from db import (
     SessionLocal, Token, Settings, Dashboard, AuditLog, 
     create_audit_log, User, create_default_dashboard 
 )
 
-# Local AI model
-# from gpt4all import GPT4All # Keep this commented if the local model is blocking deployment
+# Local AI model (Keeping the check for safe initialization)
+try:
+    from gpt4all import GPT4All
+    GPT4ALL_AVAILABLE = True
+except ImportError:
+    GPT4ALL_AVAILABLE = False
+
 
 # -----------------------
 # Load environment variables
@@ -244,12 +249,14 @@ async def connected_apps(user: dict = Depends(get_current_user)):
     })
 
 # -----------------------
-# GOOGLE SHEETS ENDPOINTS (FIXED TO MATCH FRONTEND)
+# GOOGLE SHEETS ENDPOINTS (THE FIX IS HERE)
 # -----------------------
-@app.get("/sheets/files") 
-async def sheets_list(user: dict = Depends(get_current_user)):
-    user_id = user["id"]
-    access_token = await get_valid_access_token(user_id)
+# FIX: Changed path from /sheets/files to /sheets-list/{user_id} and updated response key to 'sheets'
+@app.get("/sheets-list/{user_id}") 
+async def sheets_list(user_id: int, user: dict = Depends(get_current_user)):
+    # NOTE: user_id from path is captured but the actual user ID from the secure JWT (user["id"]) is used.
+    user_id_from_jwt = user["id"]
+    access_token = await get_valid_access_token(user_id_from_jwt)
     if not access_token:
         raise HTTPException(status_code=401, detail="Google Sheets not connected. Re-authorize required.")
         
@@ -269,8 +276,8 @@ async def sheets_list(user: dict = Depends(get_current_user)):
             raise HTTPException(status_code=500, detail="Failed to connect to Google Drive API.")
 
     files = resp.json().get("files", [])
-    # Frontend expects the key 'files'
-    return JSONResponse({"files": files}) 
+    # FIX: Returning the list under the key 'sheets' to match frontend state logic (setSheetsList(res.data.sheets))
+    return JSONResponse({"sheets": files}) 
 
 @app.get("/sheets/tabs")
 async def get_sheet_tabs(file_id: str, user: dict = Depends(get_current_user)):
@@ -323,8 +330,9 @@ async def analyze_sheet_data(request: Request, user: dict = Depends(get_current_
     })
 
 # -----------------------
-# OLD GET SHEET DATA (Keeping the old one, but it is not used in the new flow)
+# OLD GET SHEET DATA (Used by frontend to fetch specific sheet values)
 # -----------------------
+# FIX: The frontend calls this endpoint to get sheet VALUES after selection.
 @app.get("/sheets/{sheet_id}")
 async def get_sheet_data(sheet_id: str, user: dict = Depends(get_current_user)):
     user_id = user["id"]
@@ -332,6 +340,7 @@ async def get_sheet_data(sheet_id: str, user: dict = Depends(get_current_user)):
     if not access_token:
         return JSONResponse({"error": "Google Sheets not connected"}, status_code=400)
     headers = {"Authorization": f"Bearer {access_token}"}
+    # Fetching values from the first tab (defaulting to 'Sheet1')
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values:batchGet?ranges=Sheet1"
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, headers=headers)
@@ -501,29 +510,34 @@ async def get_recent_logins_endpoint(user: dict = Depends(get_current_user), db_
 # -----------------------
 # GPT4ALL AI MODEL
 # -----------------------
-MODEL_FILE = "orca-mini-3b-gguf2-q4_0.gguf2"
-MODEL_PATH = os.path.join("models", MODEL_FILE)
-# Check for model existence and initialize gpt_model safely
-
-try:
-    from gpt4all import GPT4All
-    if not os.path.isfile(MODEL_PATH):
-        print(f"ERROR: Model file missing: {MODEL_PATH}")
+if GPT4ALL_AVAILABLE:
+    MODEL_FILE = "orca-mini-3b-gguf2-q4_0.gguf2"
+    MODEL_PATH = os.path.join("models", MODEL_FILE)
+    
+    try:
+        if not os.path.isfile(MODEL_PATH):
+            print(f"ERROR: Model file missing: {MODEL_PATH}")
+            gpt_model = None
+        else:
+            gpt_model = GPT4All(model_name=MODEL_FILE, model_path="./models")
+    except Exception as e:
+        print(f"WARNING: GPT4All initialization failed: {e}. AI endpoint will be disabled.")
         gpt_model = None
-    else:
-        gpt_model = GPT4All(model_name=MODEL_FILE, model_path="./models")
-except ImportError:
-    print("WARNING: GPT4All library not installed or model unavailable. AI endpoint will be disabled.")
+else:
+    print("WARNING: GPT4All library not imported. AI endpoint will be disabled.")
     gpt_model = None
+
 
 @app.post("/ai/analyze")
 async def ai_analyze(request: Request):
     if gpt_model is None:
-        return JSONResponse({"error": "Local AI model not found"}, status_code=500)
+        return JSONResponse({"error": "Local AI model not available or initialized"}, status_code=500)
+    
     body = await request.json()
     kpis, categories, row_count = body.get("kpis"), body.get("categories"), body.get("rowCount", 0)
     if not kpis:
         return JSONResponse({"error": "No KPIs provided"}, status_code=400)
+        
     prompt = f"""
 You are an expert business analyst.
 Dataset Rows: {row_count}
