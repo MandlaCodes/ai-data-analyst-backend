@@ -226,7 +226,7 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
         
     # 🟢 FIX 3: Use the dynamic return_path 🟢
     frontend_redirect = (
-        f"http://localhost:3000{return_path}" 
+        f"https://aianalyst-gamma.vercel.app/{return_path}" 
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
