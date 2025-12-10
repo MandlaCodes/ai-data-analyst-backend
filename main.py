@@ -65,7 +65,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         # 🟢 UPDATED: Using the new, clean base domain 🟢
-        "https://aianalyst-gamma.vercel.app/", 
+        "https://aianalyst-gamma.vercel.app", 
     ],
     # CRITICAL: Must be True to allow Authorization header
     allow_credentials=True, 
