@@ -1,6 +1,7 @@
 # src/main.py
 import os
 import json
+import asyncio
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -21,7 +22,7 @@ from db import (
 )
 
 # Local AI model
-from gpt4all import GPT4All
+# from gpt4all import GPT4All # Keep this commented if the local model is blocking deployment
 
 # -----------------------
 # Load environment variables
@@ -160,6 +161,7 @@ async def get_valid_access_token(user_id):
             new_token = resp.json()
             token_data["access_token"] = new_token.get("access_token", access_token)
             token_data["expires_in"] = new_token.get("expires_in", 3600)
+            token_data["created_at"] = datetime.utcnow().isoformat() # Update timestamp
             save_token(user_id, token_data)
             access_token = token_data["access_token"]
     return access_token
@@ -168,7 +170,6 @@ async def get_valid_access_token(user_id):
 # GOOGLE OAUTH ROUTES (FIXED: Dynamic Redirect)
 # -----------------------
 @app.get("/auth/google_sheets")
-# 🟢 FIX 1: Accept return_path from frontend
 async def auth_google_sheets(user_id: str, return_path: str = "/dashboard/integrations"): 
     # Pass the return_path through the Google OAuth flow by encoding it in the 'state' parameter
     combined_state = json.dumps({"user_id": user_id, "return_path": return_path})
@@ -190,7 +191,7 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     if not code:
         return JSONResponse({"error": "No code received"}, status_code=400)
     
-    # 🟢 FIX 2: Decode the combined 'state' parameter to get user_id and return_path
+    # Decode the combined 'state' parameter to get user_id and return_path
     user_id = "unknown"
     return_path = "/dashboard/integrations" # Default fallback
     if state:
@@ -224,9 +225,9 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     except Exception:
         pass
         
-    # 🟢 FIX 3: Use the dynamic return_path 🟢
+    # Use the dynamic return_path 
     frontend_redirect = (
-        f"https://aianalyst-gamma.vercel.app/{return_path}" 
+        f"https://aianalyst-gamma.vercel.app/{return_path.lstrip('/')}" 
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
@@ -243,23 +244,86 @@ async def connected_apps(user: dict = Depends(get_current_user)):
     })
 
 # -----------------------
-# LIST GOOGLE SHEETS
+# GOOGLE SHEETS ENDPOINTS (FIXED TO MATCH FRONTEND)
 # -----------------------
-@app.get("/sheets-list")
+@app.get("/sheets/files") 
 async def sheets_list(user: dict = Depends(get_current_user)):
     user_id = user["id"]
     access_token = await get_valid_access_token(user_id)
     if not access_token:
-        return JSONResponse({"error": "Google Sheets not connected"}, status_code=400)
+        raise HTTPException(status_code=401, detail="Google Sheets not connected. Re-authorize required.")
+        
     headers = {"Authorization": f"Bearer {access_token}"}
+    # Query Drive for all spreadsheet files, limiting fields to just what we need: id and name
     params = {"q": "mimeType='application/vnd.google-apps.spreadsheet'", "fields": "files(id,name)"}
+    
     async with httpx.AsyncClient() as http_client:
-        resp = await http_client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+        try:
+            resp = await http_client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+            resp.raise_for_status() # Raise exception for 4xx or 5xx status codes
+        except httpx.HTTPStatusError as e:
+            print(f"Drive API Error: {e.response.text}")
+            raise HTTPException(status_code=e.response.status_code, detail=f"Google Drive API failed: {e.response.text}")
+        except httpx.RequestError as e:
+            print(f"HTTP Request Error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to connect to Google Drive API.")
+
     files = resp.json().get("files", [])
-    return JSONResponse({"sheets": files})
+    # Frontend expects the key 'files'
+    return JSONResponse({"files": files}) 
+
+@app.get("/sheets/tabs")
+async def get_sheet_tabs(file_id: str, user: dict = Depends(get_current_user)):
+    user_id = user["id"]
+    access_token = await get_valid_access_token(user_id)
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Google Sheets not connected. Re-authorize required.")
+        
+    headers = {"Authorization": f"Bearer {access_token}"}
+    # Use the /spreadsheets endpoint to get sheet metadata, specifically the 'sheets' property
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{file_id}?fields=sheets.properties.title"
+    
+    async with httpx.AsyncClient() as http_client:
+        try:
+            resp = await http_client.get(url, headers=headers)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(f"Sheets API Error: {e.response.text}")
+            raise HTTPException(status_code=e.response.status_code, detail=f"Google Sheets API failed: {e.response.text}")
+        except httpx.RequestError as e:
+            print(f"HTTP Request Error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to connect to Google Sheets API.")
+            
+    data = resp.json()
+    # Extract sheet titles (tab names)
+    sheets_data = data.get("sheets", [])
+    tab_names = [sheet["properties"]["title"] for sheet in sheets_data if "properties" in sheet]
+    
+    # Frontend expects the key 'tabs'
+    return JSONResponse({"tabs": tab_names})
+
+@app.post("/sheets/analyze")
+async def analyze_sheet_data(request: Request, user: dict = Depends(get_current_user)):
+    body = await request.json()
+    file_id = body.get("file_id")
+    sheet_tab = body.get("sheet_tab")
+    
+    if not file_id or not sheet_tab:
+        raise HTTPException(status_code=400, detail="Missing 'file_id' or 'sheet_tab'")
+
+    # --- MOCK RESPONSE FOR DATA ANALYSIS ---
+    print(f"Analysis started for File ID: {file_id}, Tab: {sheet_tab}")
+    await asyncio.sleep(1) # Simulate data fetching and processing time
+    
+    return JSONResponse({
+        "message": "Analysis request received. Processing...",
+        "status_url": "/api/analysis/status/123", # Placeholder for polling
+        "file_id": file_id,
+        "sheet_tab": sheet_tab
+    })
 
 # -----------------------
-# GET SHEET DATA
+# OLD GET SHEET DATA (Keeping the old one, but it is not used in the new flow)
 # -----------------------
 @app.get("/sheets/{sheet_id}")
 async def get_sheet_data(sheet_id: str, user: dict = Depends(get_current_user)):
@@ -439,11 +503,18 @@ async def get_recent_logins_endpoint(user: dict = Depends(get_current_user), db_
 # -----------------------
 MODEL_FILE = "orca-mini-3b-gguf2-q4_0.gguf2"
 MODEL_PATH = os.path.join("models", MODEL_FILE)
-if not os.path.isfile(MODEL_PATH):
-    print(f"ERROR: Model file missing: {MODEL_PATH}")
+# Check for model existence and initialize gpt_model safely
+
+try:
+    from gpt4all import GPT4All
+    if not os.path.isfile(MODEL_PATH):
+        print(f"ERROR: Model file missing: {MODEL_PATH}")
+        gpt_model = None
+    else:
+        gpt_model = GPT4All(model_name=MODEL_FILE, model_path="./models")
+except ImportError:
+    print("WARNING: GPT4All library not installed or model unavailable. AI endpoint will be disabled.")
     gpt_model = None
-else:
-    gpt_model = GPT4All(model_name=MODEL_FILE, model_path="./models")
 
 @app.post("/ai/analyze")
 async def ai_analyze(request: Request):
