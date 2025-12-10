@@ -58,31 +58,26 @@ def get_db():
 
 
 # -----------------------
-# CORS Configuration (Updated with new domain: twinix.vercel.app)
+# CORS Configuration
 # -----------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        # 🟢 UPDATED: Using the new, clean base domain 🟢
         "https://aianalyst-gamma.vercel.app", 
     ],
-    # CRITICAL: Must be True to allow Authorization header
     allow_credentials=True, 
     allow_methods=["*"],
-    # CRITICAL: Must explicitly allow the Authorization header for JWTs
     allow_headers=["Authorization", "Content-Type"],
 )
 
 
 @app.options("/{full_path:path}")
 async def preflight_handler(response: Response):
-    # This handler ensures the browser's OPTIONS request gets a 204 No Content response
-    # with the correct CORS headers attached by the middleware above.
     return Response(status_code=204) 
 
 # -----------------------
-# HEALTH CHECK (For Render's stability)
+# HEALTH CHECK
 # -----------------------
 @app.get("/")
 def health_check():
@@ -118,13 +113,11 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
     try:
-        # Use the injected db_session
         user = db_session.query(User).filter(User.id == payload["user_id"]).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         return {"id": user.id, "email": user.email}
     except HTTPException:
-        # Re-raise explicit HTTP exceptions
         raise
     except Exception as e:
         print(f"Error getting user: {e}")
@@ -134,7 +127,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 # -----------------------
 # DATABASE HELPERS 
 # -----------------------
-from db import save_token, get_token, get_user_settings, save_user_settings, get_dashboard_sessions_db # Importing helpers from db.py
+from db import save_token, get_token, get_user_settings, save_user_settings, get_dashboard_sessions_db 
 
 # -----------------------
 # GOOGLE TOKEN REFRESH
@@ -172,10 +165,14 @@ async def get_valid_access_token(user_id):
     return access_token
 
 # -----------------------
-# GOOGLE OAUTH ROUTES
+# GOOGLE OAUTH ROUTES (FIXED: Dynamic Redirect)
 # -----------------------
 @app.get("/auth/google_sheets")
-async def auth_google_sheets(user_id: str):
+# 🟢 FIX 1: Accept return_path from frontend
+async def auth_google_sheets(user_id: str, return_path: str = "/dashboard/integrations"): 
+    # Pass the return_path through the Google OAuth flow by encoding it in the 'state' parameter
+    combined_state = json.dumps({"user_id": user_id, "return_path": return_path})
+
     url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={CLIENT_ID}"
@@ -184,7 +181,7 @@ async def auth_google_sheets(user_id: str):
         f"&redirect_uri={REDIRECT_URI}"
         f"&access_type=offline"
         f"&prompt=consent"
-        f"&state={user_id}"
+        f"&state={combined_state}" # Use the combined state
     )
     return RedirectResponse(url)
 
@@ -192,6 +189,19 @@ async def auth_google_sheets(user_id: str):
 async def auth_callback(request: Request, code: str = None, state: str = None):
     if not code:
         return JSONResponse({"error": "No code received"}, status_code=400)
+    
+    # 🟢 FIX 2: Decode the combined 'state' parameter to get user_id and return_path
+    user_id = "unknown"
+    return_path = "/dashboard/integrations" # Default fallback
+    if state:
+        try:
+            state_data = json.loads(state)
+            user_id = state_data.get("user_id", "unknown")
+            return_path = state_data.get("return_path", "/dashboard/integrations") 
+        except json.JSONDecodeError:
+            # Handle legacy/simple state (where state was just user_id)
+            user_id = state
+    
     data = {
         "code": code,
         "client_id": CLIENT_ID,
@@ -202,12 +212,11 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.post("https://oauth2.googleapis.com/token", data=data)
         token_data = resp.json()
-    user_id = state or "unknown"
-    # Ensure user_id is cast to int for DB helpers if it came from the JWT flow
+    
     try:
         user_id_int = int(user_id)
     except ValueError:
-        user_id_int = user_id # Keep as string if it's from Google's state payload
+        user_id_int = user_id
         
     save_token(user_id_int, token_data)
     try:
@@ -215,9 +224,9 @@ async def auth_callback(request: Request, code: str = None, state: str = None):
     except Exception:
         pass
         
+    # 🟢 FIX 3: Use the dynamic return_path 🟢
     frontend_redirect = (
-        # 🟢 UPDATED: Redirect URL now uses the new domain 🟢
-        f"https://aianalyst-gamma.vercel.app/dashboard/integrations"
+        f"https://aianalyst-gamma.vercel.app{return_path}" 
         f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
     )
     return RedirectResponse(frontend_redirect)
@@ -365,7 +374,6 @@ async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_cur
     body = await request.json()
     name, layout = body.get("name", "Untitled Dashboard"), body.get("layout", {})
     try:
-        # user["id"] is already an integer from the JWT payload
         new_dash = Dashboard(user_id=user["id"], name=name, layout_data=json.dumps(layout), last_accessed=datetime.utcnow())
         db_session.add(new_dash)
         db_session.commit()
@@ -387,16 +395,13 @@ async def change_password(request: Request, user: dict = Depends(get_current_use
     if not new_password:
         return JSONResponse({"error": "New password required"}, status_code=400)
     
-    # --- Truncate password to 72 bytes for bcrypt compatibility ---
     safe_new_password = new_password.encode('utf-8')[:72].decode('utf-8', 'ignore')
-    # --- END FIX ---
     
     try:
         user_rec = db_session.query(User).filter(User.id == user["id"]).first()
         if not user_rec:
             return JSONResponse({"error": "User not found"}, status_code=404)
             
-        # Use the safe_new_password
         user_rec.password_hash = User.hash_password(safe_new_password)
         db_session.commit()
         create_audit_log(user["id"], "PASSWORD_CHANGE", ip_address=request.client.host)
