@@ -163,6 +163,7 @@ async def get_valid_access_token(user_id):
         }
         async with httpx.AsyncClient() as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=data)
+            resp.raise_for_status() # Ensure we handle errors during token refresh
             new_token = resp.json()
             token_data["access_token"] = new_token.get("access_token", access_token)
             token_data["expires_in"] = new_token.get("expires_in", 3600)
@@ -249,7 +250,7 @@ async def connected_apps(user: dict = Depends(get_current_user)):
     })
 
 # -----------------------
-# GOOGLE SHEETS ENDPOINTS (THE FIX IS HERE)
+# GOOGLE SHEETS ENDPOINTS 
 # -----------------------
 # FIX: Changed path from /sheets/files to /sheets-list/{user_id} and updated response key to 'sheets'
 @app.get("/sheets-list/{user_id}") 
@@ -330,24 +331,42 @@ async def analyze_sheet_data(request: Request, user: dict = Depends(get_current_
     })
 
 # -----------------------
-# OLD GET SHEET DATA (Used by frontend to fetch specific sheet values)
+# GET SHEET DATA (The Endpoint that needed fixing)
 # -----------------------
-# FIX: The frontend calls this endpoint to get sheet VALUES after selection.
-@app.get("/sheets/{sheet_id}")
-async def get_sheet_data(sheet_id: str, user: dict = Depends(get_current_user)):
-    user_id = user["id"]
-    access_token = await get_valid_access_token(user_id)
+# CRITICAL FIX: The frontend sends /sheets/{user_id}/{sheet_id}, so the route MUST reflect this structure.
+@app.get("/sheets/{user_id}/{sheet_id}")
+async def get_sheet_data(user_id: int, sheet_id: str, user: dict = Depends(get_current_user)):
+    # Use the secure user ID from the JWT payload
+    user_id_from_jwt = user["id"]
+    access_token = await get_valid_access_token(user_id_from_jwt)
+    
     if not access_token:
         return JSONResponse({"error": "Google Sheets not connected"}, status_code=400)
+        
     headers = {"Authorization": f"Bearer {access_token}"}
-    # Fetching values from the first tab (defaulting to 'Sheet1')
+    
+    # Fetching values from the first tab (defaulting to 'Sheet1'). 
+    # NOTE: You might need to make 'Sheet1' dynamic if you introduce tab selection.
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values:batchGet?ranges=Sheet1"
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers)
-    data = resp.json()
-    ranges = data.get("valueRanges", [])
-    values = ranges[0].get("values", []) if ranges else []
-    return JSONResponse({"values": values})
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status() # Ensure we catch 4xx/5xx errors from Google
+            
+        data = resp.json()
+        ranges = data.get("valueRanges", [])
+        values = ranges[0].get("values", []) if ranges else []
+        
+        return JSONResponse({"values": values})
+        
+    except httpx.HTTPStatusError as e:
+        print(f"Google Sheets API Value Fetch Error: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Google Sheets API failed to fetch data: {e.response.text}")
+    except Exception as e:
+        print(f"Unexpected error during sheet fetch: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error fetching sheet data.")
+
 
 # -----------------------
 # AUTH ROUTES (SIGNUP / LOGIN / ME)
