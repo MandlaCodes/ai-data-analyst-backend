@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi import FastAPI, Request, Depends, HTTPException, Path
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -18,7 +18,13 @@ import jwt
 # DB imports (Assuming these are in your project structure)
 from db import (
     SessionLocal, Token, Settings, Dashboard, AuditLog, 
-    create_audit_log, User, create_default_dashboard 
+    create_audit_log, User, create_default_dashboard,
+    # --- NEW/UPDATED IMPORTS ---
+    AnalysisSession, # Assuming this is your new model for analytics sessions
+    save_analysis_session, # Function to save the new session structure
+    get_analysis_session, # Function to load a single session
+    get_analysis_sessions_db # Updated function to list all sessions
+    # --- END NEW/UPDATED IMPORTS ---
 )
 
 # Local AI model (Keeping the check for safe initialization)
@@ -133,7 +139,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 # -----------------------
 # DATABASE HELPERS 
 # -----------------------
-from db import save_token, get_token, get_user_settings, save_user_settings, get_dashboard_sessions_db 
+from db import save_token, get_token, get_user_settings, save_user_settings
 
 # -----------------------
 # GOOGLE TOKEN REFRESH
@@ -449,20 +455,76 @@ async def purge_cache_endpoint(user: dict = Depends(get_current_user)):
     return JSONResponse({"message": "Server-side cache purge simulated successfully."})
 
 # -----------------------
-# DASHBOARD ENDPOINTS
+# ANALYSIS SESSION ENDPOINTS (REPLACING OLD DASHBOARD SAVE/LOAD)
 # -----------------------
-@app.get("/api/dashboard/sessions")
-async def get_dashboard_sessions_endpoint(user: dict = Depends(get_current_user)):
-    sessions = get_dashboard_sessions_db(user["id"])
+
+@app.get("/api/analysis/sessions")
+async def get_analysis_sessions_endpoint(user: dict = Depends(get_current_user)):
+    # Uses the new function to fetch structured analysis session summaries
+    sessions = get_analysis_sessions_db(user["id"])
     if not sessions:
         return JSONResponse({
-            "message": "No saved sessions found. Please create your first dashboard.",
-            "sessions": [], "action": "PROMPT_NEW_DASHBOARD"
+            "message": "No saved sessions found. Please create your first analysis.",
+            "sessions": [], "action": "PROMPT_NEW_ANALYSIS"
         })
     return JSONResponse({"sessions": sessions})
 
+@app.post("/api/analysis/save")
+async def save_analysis_session_endpoint(request: Request, user: dict = Depends(get_current_user)):
+    body = await request.json()
+    session_data = body.get("session_data")
+    session_id = body.get("session_id") # Optional: used for update
+    session_name = body.get("session_name", "Untitled Analysis")
+    
+    if not session_data:
+        raise HTTPException(status_code=400, detail="Missing session_data in request body.")
+
+    try:
+        # Delegate saving/updating to the database helper function
+        new_id = save_analysis_session(
+            user_id=user["id"],
+            session_name=session_name,
+            session_data=session_data,
+            session_id=session_id
+        )
+        
+        create_audit_log(user["id"], "ANALYSIS_SAVE", ip_address=request.client.host)
+        return JSONResponse({"message": "Analysis session saved successfully", "id": new_id})
+    except Exception as e:
+        print("Save analysis session error:", e)
+        raise HTTPException(status_code=500, detail=f"Failed to save analysis session: {e}")
+
+
+@app.get("/api/analysis/session/{session_id}")
+async def get_analysis_session_endpoint(session_id: int = Path(..., description="The ID of the analysis session to load"), 
+                                        user: dict = Depends(get_current_user)):
+    try:
+        # Delegate loading to the database helper function
+        session = get_analysis_session(user["id"], session_id)
+        
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Analysis session with ID {session_id} not found.")
+
+        return JSONResponse({"session": session})
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("Load analysis session error:", e)
+        raise HTTPException(status_code=500, detail=f"Failed to load analysis session: {e}")
+
+
+# -----------------------
+# DEPRECATED DASHBOARD ENDPOINTS (Keeping for compatibility for now)
+# -----------------------
+@app.get("/api/dashboard/sessions")
+async def get_dashboard_sessions_endpoint_legacy(user: dict = Depends(get_current_user)):
+    return await get_analysis_sessions_endpoint(user) # Redirects to the new endpoint
+    
+
 @app.post("/api/dashboard/save")
 async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
+    # This is the legacy endpoint from your previous structure.
     body = await request.json()
     name, layout = body.get("name", "Untitled Dashboard"), body.get("layout", {})
     try:
@@ -471,7 +533,7 @@ async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_cur
         db_session.commit()
         db_session.refresh(new_dash)
         create_audit_log(user["id"], "DASHBOARD_SAVE", ip_address=request.client.host)
-        return JSONResponse({"message": "Dashboard saved", "id": new_dash.id})
+        return JSONResponse({"message": "Dashboard saved (Legacy)", "id": new_dash.id})
     except Exception as e:
         db_session.rollback()
         print("Save dashboard error:", e)
