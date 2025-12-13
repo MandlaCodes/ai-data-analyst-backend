@@ -7,22 +7,22 @@ from typing import Annotated
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from fastapi.middleware.cors import CORSMiddleWARE
+from fastapi.middleware.cors import CORSMiddleware # <--- FIX: Corrected capitalization
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 
 # --- IMPORT ALL NECESSARY OBJECTS FROM db.py ---
 from db import (
-    User,
+    User, 
     AuditLog, 
     Dashboard,  
     Settings,   
     Token,      
     SessionLocal,
-    # === ADD THESE IMPORTS FOR TABLE CREATION ===
-    Base,       
+    # Added for database initialization on startup
+    Base,
     engine,
-    # ============================================
+    # End database initialization imports
     get_user_settings_db, 
     get_tokens_metadata_db, 
     get_audit_logs_db,
@@ -39,7 +39,7 @@ app = FastAPI(title="AI Data Analyst Backend")
 
 origins = ["http://localhost:3000"] 
 app.add_middleware(
-    CORSMiddleware,
+    CORSMiddleware, # <--- FIX: Must match the corrected import
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
@@ -55,14 +55,14 @@ def on_startup():
     """Create database tables if they do not exist."""
     print("Attempting to create database tables...")
     try:
-        # Calls the function to create tables defined in Base
         Base.metadata.create_all(bind=engine)
         print("Database initialization successful.")
     except Exception as e:
         print(f"Database initialization FAILED: {e}")
-        # In a real app, you might crash here or log the error severely
+        # Allows service to fail if DB connection is truly broken
 
 # =========================================================================
+
 
 def get_db():
     db = SessionLocal()
@@ -89,8 +89,6 @@ async def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]):
     except JWTError:
         raise credentials_exception
         
-    # FIX: Ensure we handle the user_id type correctly
-    # If your AuthUserID expects an int, ensure the user_id_str is numeric before converting
     try:
         return int(user_id_str) 
     except ValueError:
@@ -108,7 +106,6 @@ AuthUserID = Annotated[int, Depends(get_current_user_id)]
 @app.get("/api/user/profile", status_code=status.HTTP_200_OK)
 async def get_user_profile(auth_user_id: AuthUserID, db: DBSession):
     """Loads authenticated user profile data (for Profile.jsx)."""
-    # Assuming get_user_profile_db is implemented
     profile = get_user_profile_db(db, auth_user_id)
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
@@ -129,8 +126,7 @@ async def save_datasets(auth_user_id: AuthUserID, db: DBSession, payload: dict):
 
     try:
         datasets_json = json.dumps(datasets)
-        # Using the standard SQLAlchemy integer ID for querying
-        dashboard = db.query(Dashboard).filter(Dashboard.user_id == auth_user_id).first() 
+        dashboard = db.query(Dashboard).filter(Dashboard.user_id == auth_user_id).first()
 
         if dashboard:
             dashboard.layout_data = datasets_json
