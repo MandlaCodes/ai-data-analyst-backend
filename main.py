@@ -7,7 +7,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from fastapi.middleware.cors import CORSMiddleware # <--- FIX: Corrected capitalization
+from fastapi.middleware.cors import CORSMiddleware # <--- CORRECTED: Case-sensitive fix
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 
@@ -16,13 +16,13 @@ from db import (
     User, 
     AuditLog, 
     Dashboard,  
-    Settings,   
-    Token,      
+    Settings,   # Now correctly defined in db.py
+    Token,      # Now correctly defined in db.py
     SessionLocal,
-    # Added for database initialization on startup
-    Base,
+    # === CRITICAL IMPORTS for Table Creation ===
+    Base,       
     engine,
-    # End database initialization imports
+    # ===========================================
     get_user_settings_db, 
     get_tokens_metadata_db, 
     get_audit_logs_db,
@@ -39,7 +39,7 @@ app = FastAPI(title="AI Data Analyst Backend")
 
 origins = ["http://localhost:3000"] 
 app.add_middleware(
-    CORSMiddleware, # <--- FIX: Must match the corrected import
+    CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
@@ -55,14 +55,15 @@ def on_startup():
     """Create database tables if they do not exist."""
     print("Attempting to create database tables...")
     try:
+        # This uses the Base and engine imported from db.py
         Base.metadata.create_all(bind=engine)
         print("Database initialization successful.")
     except Exception as e:
+        # Added failure logging to help debug DB connection issues later
         print(f"Database initialization FAILED: {e}")
-        # Allows service to fail if DB connection is truly broken
+        # NOTE: A failure here usually means the DATABASE_URL is wrong/inaccessible.
 
 # =========================================================================
-
 
 def get_db():
     db = SessionLocal()
@@ -90,6 +91,7 @@ async def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]):
         raise credentials_exception
         
     try:
+        # Assuming JWT "sub" is the user's primary integer ID
         return int(user_id_str) 
     except ValueError:
         raise credentials_exception
@@ -100,9 +102,6 @@ AuthUserID = Annotated[int, Depends(get_current_user_id)]
 # 0. CORE USER/AUTH ROUTES (Essential for profile data)
 # =========================================================================
 
-# NOTE: The LOGIN/TOKEN route is omitted, but assumed to exist and generate the JWT.
-
-# Loads data for the Profile page and general user context (e.g., Sidebar)
 @app.get("/api/user/profile", status_code=status.HTTP_200_OK)
 async def get_user_profile(auth_user_id: AuthUserID, db: DBSession):
     """Loads authenticated user profile data (for Profile.jsx)."""
@@ -116,7 +115,6 @@ async def get_user_profile(auth_user_id: AuthUserID, db: DBSession):
 # 1. ANALYTICS / TRENDS ROUTES (Uses 'dashboards' table)
 # =========================================================================
 
-# Saves the entire working session (for Analytics.jsx)
 @app.post("/api/datasets/save", status_code=status.HTTP_200_OK)
 async def save_datasets(auth_user_id: AuthUserID, db: DBSession, payload: dict):
     """Saves the user's active session data (datasets, analysis) to the dashboards table."""
@@ -126,7 +124,7 @@ async def save_datasets(auth_user_id: AuthUserID, db: DBSession, payload: dict):
 
     try:
         datasets_json = json.dumps(datasets)
-        dashboard = db.query(Dashboard).filter(Dashboard.user_id == auth_user_id).first()
+        dashboard = db.query(Dashboard).filter(Dashboard.user_id == auth_user_id).first() 
 
         if dashboard:
             dashboard.layout_data = datasets_json
@@ -145,7 +143,6 @@ async def save_datasets(auth_user_id: AuthUserID, db: DBSession, payload: dict):
         db.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to save data. {str(e)}")
 
-# Loads the active session (for Analytics.jsx and Trends.jsx initial data)
 @app.get("/api/datasets/latest", status_code=status.HTTP_200_OK)
 async def load_latest_datasets(auth_user_id: AuthUserID, db: DBSession):
     """Loads the user's latest dashboard session data."""
@@ -155,7 +152,6 @@ async def load_latest_datasets(auth_user_id: AuthUserID, db: DBSession):
         return [] 
     
     try:
-        # Analytics.jsx should request this to load the datasets
         return json.loads(dashboard.layout_data)
     except json.JSONDecodeError:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Corrupt dashboard data found.")
@@ -165,12 +161,10 @@ async def load_latest_datasets(auth_user_id: AuthUserID, db: DBSession):
 # 2. SETTINGS ROUTES (Uses 'settings' table)
 # =========================================================================
 
-# Loads settings (for Settings.jsx)
 @app.get("/api/settings", status_code=status.HTTP_200_OK)
 async def fetch_settings(auth_user_id: AuthUserID, db: DBSession):
     return get_user_settings_db(db, auth_user_id)
 
-# Saves settings (for Settings.jsx)
 @app.post("/api/settings/save", status_code=status.HTTP_200_OK)
 async def save_settings(auth_user_id: AuthUserID, db: DBSession, settings_data: dict):
     try:
@@ -194,7 +188,6 @@ async def save_settings(auth_user_id: AuthUserID, db: DBSession, settings_data: 
 # 3. SECURITY / AUDIT LOGS ROUTES (Uses 'audit_logs' table)
 # =========================================================================
 
-# Loads logs (for Security.jsx)
 @app.get("/api/security/logs", status_code=status.HTTP_200_OK)
 async def fetch_audit_logs(auth_user_id: AuthUserID, db: DBSession):
     return get_audit_logs_db(db, auth_user_id)
@@ -204,9 +197,7 @@ async def fetch_audit_logs(auth_user_id: AuthUserID, db: DBSession):
 # 4. INTEGRATIONS ROUTES (Uses 'tokens' table)
 # =========================================================================
 
-# Loads integration status (for Integrations.jsx)
 @app.get("/api/integrations/status", status_code=status.HTTP_200_OK)
 async def get_integrations_status(auth_user_id: AuthUserID, db: DBSession):
     """Retrieves status of connected third-party services."""
-    # Integrations.jsx should call this to see what is connected
     return get_tokens_metadata_db(db, auth_user_id)
