@@ -1,111 +1,258 @@
-# db.py
-
 import os
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, JSON, TIMESTAMP, text
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.ext.declarative import declarative_base
-from databases import Database # For async database connections
-from dotenv import load_dotenv
+import json
+from datetime import datetime
+from sqlalchemy import create_engine, Column, String, DateTime, Boolean, Text, Integer 
+from sqlalchemy.orm import declarative_base, sessionmaker
+from passlib.context import CryptContext
 
-load_dotenv()
+# Password Hashing Context (Ensure passlib[bcrypt] is installed)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# --- Database Configuration ---
+# ---------------------------
+# Paths and Engine (CRITICAL UPDATE FOR STABILITY)
+# ---------------------------
 
-DATABASE_URL = os.getenv("DATABASE_URL") 
-if not DATABASE_URL:
-    # Use a secure default for local testing
-    LOCAL_DB_URL = "postgresql://postgres:password@localhost/ai_data_analyst" 
-    DATABASE_URL = LOCAL_DB_URL
-    print(f"WARNING: Using fallback local database URL: {DATABASE_URL}")
+# Use the DATABASE_URL environment variable for production (Render, etc.)
+# Fallback to local SQLite for local development
+DB_URL = os.environ.get("DATABASE_URL")
 
-# Fix for compatibility with psycopg2 when using 'postgres://' scheme
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# Connect Arguments
+connect_args = {}
 
-
-engine = create_engine(DATABASE_URL)
-# SessionLocal is the session factory for synchronous ORM operations
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-Base = declarative_base()
-# database is the connection object for async databases operations (used by the 'databases' library)
-database = Database(DATABASE_URL) 
-
-# --- Database Models ---
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    hashed_password = Column(String)
-    is_active = Column(Boolean, default=True)
-    # user_id is crucial for identifying users across systems/sessions (used in JWT payload)
-    user_id = Column(String, unique=True, index=True, nullable=True) 
-
-class Settings(Base): # Renamed from UserSettings to match main.py import
-    __tablename__ = "settings"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, unique=True, index=True) # Assuming integer ID here
-    settings_data = Column(JSON, nullable=True) 
-    google_sheet_integration_token = Column(String, nullable=True)
-    ai_model_preference = Column(String, default="default_model")
+if DB_URL:
     
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, index=True)
-    timestamp = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
-    action = Column(String, nullable=False)
-    details = Column(JSON, nullable=True) 
+    # Production: Use the provided URL (e.g., PostgreSQL)
+    print(f"Connecting to production database via DATABASE_URL.")
+    # Standard fix for Render/external PostgreSQL connections
+    if DB_URL.startswith("postgres://") and not "?" in DB_URL:
+        DB_URL += "?sslmode=require"
+    pass
+else:
+    # Development/Local: Use SQLite
+    print(f"DATABASE_URL not found. Falling back to local SQLite.")
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DB_PATH = os.path.join(BASE_DIR, "tokens.db")
+    DB_URL = f"sqlite:///{DB_PATH}"
+    # Required for SQLite + FastAPI to handle threading issues
+    connect_args = {"check_same_thread": False} 
 
-class Dashboard(Base):
-    __tablename__ = "dashboards"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, index=True)
-    layout_data = Column(JSON) 
-    last_accessed = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
+engine = create_engine(
+    DB_URL,
+    connect_args=connect_args,
+    # 🟢 CRITICAL FIXES FOR PRODUCTION DATABASE RELIABILITY 🟢
+    pool_pre_ping=True,      # Checks connection validity before using it
+    pool_recycle=3600,       # Recycles connections after 1 hour (common cloud DB timeout)
+    pool_size=10,            # Defines the connection pool size
+    max_overflow=20          # Defines how many connections can be created above pool_size
+)
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+Base = declarative_base()
+
+# ---------------------------
+# Database Models (FIXED user_id types to Integer)
+# ---------------------------
+
+# 0. User Table
+class User(Base):
+    """Stores user accounts for authentication."""
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True) 
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    
+    @staticmethod
+    def hash_password(password: str) -> str:
+        return pwd_context.hash(password)
+
+    def verify_password(self, password: str) -> bool:
+        return pwd_context.verify(password, self.password_hash)
+
+# 1. Token Table
 class Token(Base):
     __tablename__ = "tokens"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, index=True)
-    service_name = Column(String, index=True, nullable=False)
-    access_token = Column(String, nullable=True)
-    refresh_token = Column(String, nullable=True)
-    expires_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    # FIX: Changed to Integer to match User.id
+    user_id = Column(Integer, primary_key=True, index=True) 
+    token_data = Column(String)
+
+# 2. Settings Table
+class Settings(Base):
+    """Stores the general application configuration (from Settings.jsx) for a user."""
+    __tablename__ = "settings"
+    # FIX: Changed to Integer to match User.id
+    user_id = Column(Integer, primary_key=True, index=True) 
+    settings_data = Column(String) 
+
+# 3. Dashboard Table
+class Dashboard(Base):
+    """Stores individual dashboard layouts/sessions for a user."""
+    __tablename__ = "dashboards"
+    # Keeping id as a UUID-like String is fine.
+    id = Column(String, primary_key=True, index=True, default=lambda: os.urandom(16).hex()) 
+    # FIX: Changed to Integer to match User.id
+    user_id = Column(Integer, index=True) 
+    name = Column(String, default="Untitled Dashboard")
+    last_accessed = Column(DateTime, default=datetime.utcnow)
+    layout_data = Column(Text) 
+
+# 4. AuditLog Table
+class AuditLog(Base):
+    """Stores security and login events for the user's security page."""
+    __tablename__ = "audit_logs"
+    id = Column(String, primary_key=True, default=lambda: os.urandom(16).hex())
+    # FIX: Changed to Integer to match User.id
+    user_id = Column(Integer, index=True) 
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    event_type = Column(String) 
+    ip_address = Column(String)
+    device_info = Column(String)
+    is_suspicious = Column(Boolean, default=False)
 
 
-# --- Dependency Function ---
+# Create tables automatically if they don't exist
+Base.metadata.create_all(engine)
 
-def get_db():
-    """Dependency for providing a synchronous SQLAlchemy database session to FastAPI routes."""
-    db = SessionLocal()
+# ---------------------------
+# Helper functions 
+# ---------------------------
+
+def create_default_dashboard(user_id: int, dashboard_name="Getting Started Dashboard"):
+    """Creates a basic dashboard entry for a new user."""
+    session = SessionLocal()
     try:
-        yield db
+        default_layout_data = json.dumps({
+            "widgets": [],
+            "message": "Welcome! Click here to import your first dataset."
+        })
+        
+        dashboard_entry = Dashboard(
+            user_id=user_id, 
+            name=dashboard_name,
+            layout_data=default_layout_data,
+            last_accessed=datetime.utcnow()
+        )
+        
+        session.add(dashboard_entry)
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        print(f"Error creating default dashboard for user {user_id}: {e}")
+        return False
     finally:
-        db.close()
+        session.close()
 
-# --- CRUD Functions (Used by main.py) ---
+def save_token(user_id, token_data):
+    session = SessionLocal()
+    try:
+        token_json = json.dumps(token_data)
+        token = session.query(Token).filter(Token.user_id == user_id).first()
+        if token:
+            token.token_data = token_json
+        else:
+            token = Token(user_id=user_id, token_data=token_json)
+            session.add(token)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        print(f"Error saving token: {e}")
+    finally:
+        session.close()
 
-# NOTE: The CRUD functions must match the arguments and return types expected in main.py.
+def get_token(user_id):
+    session = SessionLocal()
+    try:
+        token = session.query(Token).filter(Token.user_id == user_id).first()
+        if token:
+            return json.loads(token.token_data)
+        return None
+    finally:
+        session.close()
 
-def get_user_settings_db(db: Session, user_id: int):
-    """Retrieve user settings."""
-    # Assuming user_id is an integer, matching the model definition
-    return db.query(Settings).filter(Settings.user_id == user_id).first()
+def delete_token(user_id):
+    session = SessionLocal()
+    try:
+        token = session.query(Token).filter(Token.user_id == user_id).first()
+        if token:
+            session.delete(token)
+            session.commit()
+    except Exception as e:
+        session.rollback()
+        print(f"Error deleting token: {e}")
+    finally:
+        session.close()
+    
+def create_audit_log(user_id, event_type, ip_address="unknown", device_info="unknown", is_suspicious=False):
+    """Creates a new log entry (e.g., for login or password change)."""
+    session = SessionLocal()
+    try:
+        log_entry = AuditLog(
+            user_id=user_id,
+            event_type=event_type,
+            ip_address=ip_address,
+            device_info=device_info,
+            is_suspicious=is_suspicious
+        )
+        session.add(log_entry)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        print(f"Error creating audit log: {e}")
+    finally:
+        session.close()
 
-def get_tokens_metadata_db(db: Session, user_id: int):
-    """Retrieve metadata about user tokens/integrations."""
-    return db.query(Token).filter(Token.user_id == user_id).all()
+# ---------------------------
+# SETTINGS & DASHBOARD HELPER FUNCTIONS (ADDED TO FIX IMPORTERROR)
+# ---------------------------
 
-def get_audit_logs_db(db: Session, user_id: int):
-    """Retrieve audit logs for the user."""
-    return db.query(AuditLog).filter(AuditLog.user_id == user_id).order_by(AuditLog.timestamp.desc()).all()
+def get_user_settings(user_id):
+    """Retrieves user settings as a dictionary."""
+    session = SessionLocal()
+    try:
+        settings_rec = session.query(Settings).filter(Settings.user_id == user_id).first()
+        if settings_rec and settings_rec.settings_data:
+            return json.loads(settings_rec.settings_data)
+        # Return default settings if none are found
+        return {"theme": "dark", "notifications": True}
+    finally:
+        session.close()
 
-def get_latest_dashboard_db(db: Session, user_id: int):
-    """Retrieve the latest saved dashboard."""
-    return db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
+def save_user_settings(user_id, settings_data):
+    """Saves user settings, converting the dictionary to a JSON string."""
+    session = SessionLocal()
+    try:
+        settings_json = json.dumps(settings_data)
+        settings_rec = session.query(Settings).filter(Settings.user_id == user_id).first()
+        if settings_rec:
+            settings_rec.settings_data = settings_json
+        else:
+            settings_rec = Settings(user_id=user_id, settings_data=settings_json)
+            session.add(settings_rec)
+        session.commit()
+        return {"message": "Settings saved successfully"}
+    except Exception as e:
+        session.rollback()
+        print(f"Error saving settings: {e}")
+        # Raising an HTTPException here would be better if this were not a helper function
+        raise # Re-raise to be handled by the caller
+    finally:
+        session.close()
 
-def get_user_profile_db(db: Session, user_id: int):
-    """Retrieve the user profile."""
-    return db.query(User).filter(User.id == user_id).first()
+def get_dashboard_sessions_db(user_id):
+    """Retrieves all dashboard entries for a user."""
+    session = SessionLocal()
+    try:
+        dashboards = session.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).all()
+        # Convert ORM objects to a list of dicts for JSON serialization
+        return [
+            {
+                "id": d.id,
+                "name": d.name,
+                "last_accessed": d.last_accessed.isoformat(),
+                "layout_data": json.loads(d.layout_data) if d.layout_data else {}
+            }
+            for d in dashboards
+        ]
+    finally:
+        session.close()
