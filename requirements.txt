@@ -7,10 +7,11 @@ databases==0.9.0
 gpt4all==2.7.0
 requests==2.32.3
 PyJWT==2.10.1
+**python-jose** # <--- FIX: This is the missing dependency
 tqdm==4.67.1
 typing-extensions==4.15.0
 passlib
 bcrypt
-passlib==1.7.4  # Known stable version compatible with the ecosystem
-bcrypt==4.1.3   # Known stable version
-psycopg2-binary # <--- ADD THIS LINE
+passlib==1.7.4
+bcrypt==4.1.3
+psycopg2-binary
