@@ -9,7 +9,8 @@ import uuid
 from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
+# CRITICAL: If you use EmailStr, you MUST have the pydantic[email] dependency installed.
+from pydantic import BaseModel, EmailStr 
 from jose import jwt, JWTError
 from fastapi.security import OAuth2PasswordBearer
 
@@ -23,14 +24,14 @@ from db import (
 )
 
 # --- Environment and Configuration ---
-SECRET_KEY = os.environ.get("SECRET_KEY", "THIS_IS_A_VERY_INSECURE_DEFAULT_SECRET_CHANGE_ME_IN_PROD")
+JWT_SECRET = os.environ.get("SECRET_KEY", "THIS_IS_A_VERY_INSECURE_DEFAULT_SECRET_CHANGE_ME_IN_PROD")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 API_TITLE = "AI Data Analyst Backend"
 
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
-GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:10000/auth/google/callback")
+GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI", "http://localhost:10000/auth/google/callback")
 
 # --- Pydantic Schemas ---
 
@@ -48,7 +49,7 @@ class AnalysisSaveRequest(BaseModel):
     config: dict
     results: dict
 
-# NEW: Schema for Autosave requests (doesn't require a name, but is simpler)
+# NEW: Schema for Autosave requests
 class AnalysisAutosaveRequest(BaseModel):
     source: str
     config: dict
@@ -83,6 +84,7 @@ def on_startup():
     """CRITICAL: Create database tables if they do not exist."""
     print("Attempting to create database tables...")
     try:
+        # NOTE: This assumes 'db.Base' and 'db.engine' are correctly defined and imported from db.py
         Base.metadata.create_all(bind=engine)
         print("Database initialization successful.")
     except Exception as e:
@@ -109,6 +111,7 @@ def create_access_token(data: dict):
 def authenticate_user(db: Session, email: str, password: str):
     """Checks credentials and returns the User object or raises an error."""
     user = get_user_by_email(db, email)
+    # NOTE: Assumes user object has a verify_password method (using passlib/bcrypt)
     if not user or not user.verify_password(password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
@@ -123,6 +126,7 @@ def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]):
         user_id_str: str = payload.get("sub")
         if user_id_str is None:
             raise credentials_exception
+        # Ensure user ID is converted to int for database lookups
         user_id = int(user_id_str)
     except (JWTError, ValueError):
         raise credentials_exception
@@ -131,12 +135,14 @@ def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]):
 
 def get_current_user(db: DBSession, user_id: Annotated[int, Depends(get_current_user_id)]):
     """Dependency that returns the user dictionary for the current session."""
+    # NOTE: Assumes get_user_profile_db returns the ORM object
     user = get_user_profile_db(db, user_id)
     if user is None:
         raise credentials_exception
     
     return {"id": user.id, "email": user.email}
 
+# Type aliases for dependency injection
 AuthUser = Annotated[dict, Depends(get_current_user)]
 AuthUserID = Annotated[int, Depends(get_current_user_id)]
 
@@ -178,22 +184,28 @@ def me(user: AuthUser):
 
 # Mock functions for Google Sheets logic (since external libraries are not used here)
 def get_google_auth_url(state: str, return_path: str):
+    # This should construct a real OAuth URL using the client ID/secret
     return "https://accounts.google.com/o/oauth2/v2/auth?dummy_url"
 
 def exchange_code_for_token(code: str):
+    # This should call the Google token endpoint
     return {"access_token": f"mock_token_{uuid.uuid4()}", "refresh_token": None}
 
 def fetch_user_sheets(token: dict):
+    # This should call the Google Sheets API to list sheets
     return {"sheets": [{"id": "sheet1", "name": "Sales Data 2025"}, {"id": "sheet2", "name": "Marketing Spend"}]}
 
 def fetch_sheet_data(token: dict, sheet_id: str):
+    # This should call the Google Sheets API to fetch sheet data
     return {"data": {"headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}}
 
+# FIX: Removed the default value from the 'user' parameter to resolve the AssertionError
 @app.get("/auth/google_sheets", tags=["Integrations"])
 def google_oauth_start(
     return_path: str = "/dashboard/integrations",
-    user: AuthUser = Depends(get_current_user)
+    user: AuthUser # NOTE: AuthUser already includes Depends(get_current_user), making it required.
 ):
+    """Initiates the Google OAuth flow."""
     state = str(uuid.uuid4())
     auth_url = get_google_auth_url(state=state, return_path=return_path)
     return {"auth_url": auth_url}
@@ -207,6 +219,8 @@ def google_oauth_callback(
     db: DBSession,
     request: Request
 ):
+    """Handles the callback from Google, exchanges the code for a token, and saves it."""
+    # NOTE: In a real app, you would validate the state and handle CSRF protection here.
     token_data = exchange_code_for_token(code)
     save_google_token(db, user["id"], token_data)
 
@@ -219,22 +233,24 @@ def google_oauth_callback(
 
 @app.get("/sheets-list", tags=["Integrations"])
 def sheets_list(user: AuthUser, db: DBSession):
+    """Fetches a list of available Google Sheets for the authenticated user."""
     token = get_google_token(db, user["id"])
     if not token:
         raise HTTPException(status_code=403, detail="Google not connected. Please authorize.")
 
-    # Using the mock fetch function
+    # Using the mock fetch function (replace with real Sheets API call)
     sheets = fetch_user_sheets(token)
     return sheets
 
 
 @app.get("/sheets/{sheet_id}", tags=["Integrations"])
 def get_sheet(sheet_id: str, user: AuthUser, db: DBSession):
+    """Fetches data from a specific Google Sheet."""
     token = get_google_token(db, user["id"])
     if not token:
         raise HTTPException(status_code=403, detail="Google not connected. Please authorize.")
 
-    # Using the mock fetch function
+    # Using the mock fetch function (replace with real Sheets API call)
     data = fetch_sheet_data(token, sheet_id)
     return data
 
@@ -243,9 +259,8 @@ def get_sheet(sheet_id: str, user: AuthUser, db: DBSession):
 # Existing endpoint for explicit save
 @app.post("/analysis/save", tags=["Analysis"])
 def save_analysis(payload: AnalysisSaveRequest, user_id: AuthUserID, db: DBSession, request: Request):
+    """Explicitly saves the analysis session with a user-provided name."""
     
-    # Check if a session with the same name exists (optional but good practice)
-    # For now, we will simply create a new named dashboard record
     layout_data_json = json.dumps({"config": payload.config, "results": payload.results, "source": payload.source})
 
     dashboard = Dashboard(
@@ -265,23 +280,23 @@ def save_analysis(payload: AnalysisSaveRequest, user_id: AuthUserID, db: DBSessi
 # NEW: Endpoint for implicit autosave (used when navigating away or clearing)
 @app.post("/analysis/autosave", tags=["Analysis"])
 def autosave_analysis(payload: AnalysisAutosaveRequest, user_id: AuthUserID, db: DBSession):
-    """Saves the current in-progress analysis to the user's implicit session."""
+    """Saves the current in-progress analysis to the user's implicit session (the latest one)."""
     
     # 1. Look for the most recent session (which is the current working session)
+    # We use a custom order_by here to ensure we get the latest session by access time
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
 
     layout_data_json = json.dumps({"config": payload.config, "results": payload.results, "source": payload.source})
 
     if dashboard:
         # Update existing session
-        # Keep the existing name unless it was the default "Implicit Working Session"
-        if dashboard.name == "Implicit Working Session":
+        if dashboard.name == "Implicit Working Session" or not dashboard.name:
             dashboard.name = payload.source or "Implicit Working Session"
         
         dashboard.layout_data = layout_data_json
         dashboard.last_accessed = datetime.now(timezone.utc)
     else:
-        # Create a new session record
+        # Create a new session record if none exists
         dashboard = Dashboard(
             user_id=user_id,
             name=payload.source or "Implicit Working Session",
@@ -299,16 +314,19 @@ def autosave_analysis(payload: AnalysisAutosaveRequest, user_id: AuthUserID, db:
 def get_current_analysis(user_id: AuthUserID, db: DBSession):
     """Retrieves the most recently accessed dashboard/session for the user."""
 
-    # Fetch the most recent dashboard record (which represents the user's current working session)
+    # Fetch the most recent dashboard record (current working session)
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
 
     if not dashboard or not dashboard.layout_data:
-        # Return 404 if no previous session exists, triggering a fresh start on the frontend
+        # Return 404 if no previous session exists
         raise HTTPException(status_code=404, detail="No current analysis session found.")
 
     # Deserialize the data stored in the database
-    layout_data = json.loads(dashboard.layout_data) if dashboard.layout_data else {} 
-    
+    try:
+        layout_data = json.loads(dashboard.layout_data) if dashboard.layout_data else {} 
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Corrupt session data found.")
+
     return {
         "id": dashboard.id,
         "name": dashboard.name,
@@ -320,11 +338,16 @@ def get_current_analysis(user_id: AuthUserID, db: DBSession):
 
 @app.get("/analysis/sessions", tags=["Analysis"])
 def list_analysis_sessions(user_id: AuthUserID, db: DBSession):
+    """Lists all saved analysis sessions for the user."""
     dashboards = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).all()
     
     sessions = []
     for d in dashboards:
-        layout_data = json.loads(d.layout_data) if d.layout_data else {} 
+        try:
+            layout_data = json.loads(d.layout_data) if d.layout_data else {} 
+        except json.JSONDecodeError:
+            layout_data = {"source": "Corrupted Data", "config": {}}
+
         sessions.append({
             "id": d.id,
             "name": d.name,
@@ -339,6 +362,7 @@ def list_analysis_sessions(user_id: AuthUserID, db: DBSession):
 
 @app.get("/dashboards", tags=["Dashboard"])
 def dashboards(user_id: AuthUserID, db: DBSession):
+    """Alias for listing analysis sessions (dashboards)."""
     return list_analysis_sessions(user_id, db)
 
 # -------------------- HEALTH --------------------
