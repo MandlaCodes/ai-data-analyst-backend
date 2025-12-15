@@ -24,7 +24,8 @@ from db import (
 )
 
 # --- Environment and Configuration ---
-JWT_SECRET = os.environ.get("SECRET_KEY", "THIS_IS_A_VERY_INSECURE_DEFAULT_SECRET_CHANGE_ME_IN_PROD")
+# NOTE: Changing JWT_SECRET to SECRET_KEY for consistency with the create_access_token function below
+SECRET_KEY = os.environ.get("SECRET_KEY", "THIS_IS_A_VERY_INSECURE_DEFAULT_SECRET_CHANGE_ME_IN_PROD") 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 API_TITLE = "AI Data Analyst Backend"
@@ -105,7 +106,8 @@ def create_access_token(data: dict):
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    # Uses SECRET_KEY defined at the top
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM) 
     return encoded_jwt
 
 def authenticate_user(db: Session, email: str, password: str):
@@ -199,11 +201,11 @@ def fetch_sheet_data(token: dict, sheet_id: str):
     # This should call the Google Sheets API to fetch sheet data
     return {"data": {"headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}}
 
-# FIX: Removed the default value from the 'user' parameter to resolve the AssertionError
+# **CRITICAL FIX APPLIED HERE**
 @app.get("/auth/google_sheets", tags=["Integrations"])
 def google_oauth_start(
-    return_path: str = "/dashboard/integrations",
-    user: AuthUser # NOTE: AuthUser already includes Depends(get_current_user), making it required.
+    user: AuthUser, # <-- REQUIRED (must be first)
+    return_path: str = "/dashboard/integrations" # <-- OPTIONAL (must be second)
 ):
     """Initiates the Google OAuth flow."""
     state = str(uuid.uuid4())
