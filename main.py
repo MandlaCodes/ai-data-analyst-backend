@@ -48,7 +48,7 @@ class AnalysisSaveRequest(BaseModel):
     config: dict
     results: dict
 
-# NEW: Schema for Autosave requests (doesn't require a name)
+# NEW: Schema for Autosave requests (doesn't require a name, but is simpler)
 class AnalysisAutosaveRequest(BaseModel):
     source: str
     config: dict
@@ -184,10 +184,10 @@ def exchange_code_for_token(code: str):
     return {"access_token": f"mock_token_{uuid.uuid4()}", "refresh_token": None}
 
 def fetch_user_sheets(token: dict):
-    return [{"id": "sheet1", "title": "Sales Data 2025"}, {"id": "sheet2", "title": "Marketing Spend"}]
+    return {"sheets": [{"id": "sheet1", "name": "Sales Data 2025"}, {"id": "sheet2", "name": "Marketing Spend"}]}
 
 def fetch_sheet_data(token: dict, sheet_id: str):
-    return {"headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}
+    return {"data": {"headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}}
 
 @app.get("/auth/google_sheets", tags=["Integrations"])
 def google_oauth_start(
@@ -223,8 +223,9 @@ def sheets_list(user: AuthUser, db: DBSession):
     if not token:
         raise HTTPException(status_code=403, detail="Google not connected. Please authorize.")
 
+    # Using the mock fetch function
     sheets = fetch_user_sheets(token)
-    return {"sheets": sheets}
+    return sheets
 
 
 @app.get("/sheets/{sheet_id}", tags=["Integrations"])
@@ -233,8 +234,9 @@ def get_sheet(sheet_id: str, user: AuthUser, db: DBSession):
     if not token:
         raise HTTPException(status_code=403, detail="Google not connected. Please authorize.")
 
+    # Using the mock fetch function
     data = fetch_sheet_data(token, sheet_id)
-    return {"data": data}
+    return data
 
 # -------------------- ANALYSIS SESSIONS --------------------
 
@@ -242,22 +244,16 @@ def get_sheet(sheet_id: str, user: AuthUser, db: DBSession):
 @app.post("/analysis/save", tags=["Analysis"])
 def save_analysis(payload: AnalysisSaveRequest, user_id: AuthUserID, db: DBSession, request: Request):
     
-    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
-
+    # Check if a session with the same name exists (optional but good practice)
+    # For now, we will simply create a new named dashboard record
     layout_data_json = json.dumps({"config": payload.config, "results": payload.results, "source": payload.source})
 
-    if dashboard:
-        dashboard.name = payload.name
-        dashboard.layout_data = layout_data_json
-        dashboard.last_accessed = datetime.now(timezone.utc)
-    else:
-        dashboard = Dashboard(
-            user_id=user_id,
-            name=payload.name,
-            layout_data=layout_data_json
-        )
-        db.add(dashboard)
-    
+    dashboard = Dashboard(
+        user_id=user_id,
+        name=payload.name,
+        layout_data=layout_data_json
+    )
+    db.add(dashboard)
     db.commit()
 
     create_audit_log(db, user_id=user_id, event_type="ANALYSIS_SAVED", ip_address=request.client.host if request.client else "unknown")
@@ -271,19 +267,24 @@ def save_analysis(payload: AnalysisSaveRequest, user_id: AuthUserID, db: DBSessi
 def autosave_analysis(payload: AnalysisAutosaveRequest, user_id: AuthUserID, db: DBSession):
     """Saves the current in-progress analysis to the user's implicit session."""
     
+    # 1. Look for the most recent session (which is the current working session)
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
 
     layout_data_json = json.dumps({"config": payload.config, "results": payload.results, "source": payload.source})
 
     if dashboard:
-        # Preserve existing name or use a default marker
-        dashboard.name = dashboard.name if dashboard.name != "Implicit Working Session" else "Implicit Working Session"
+        # Update existing session
+        # Keep the existing name unless it was the default "Implicit Working Session"
+        if dashboard.name == "Implicit Working Session":
+            dashboard.name = payload.source or "Implicit Working Session"
+        
         dashboard.layout_data = layout_data_json
         dashboard.last_accessed = datetime.now(timezone.utc)
     else:
+        # Create a new session record
         dashboard = Dashboard(
             user_id=user_id,
-            name="Implicit Working Session",
+            name=payload.source or "Implicit Working Session",
             layout_data=layout_data_json
         )
         db.add(dashboard)
@@ -298,18 +299,14 @@ def autosave_analysis(payload: AnalysisAutosaveRequest, user_id: AuthUserID, db:
 def get_current_analysis(user_id: AuthUserID, db: DBSession):
     """Retrieves the most recently accessed dashboard/session for the user."""
 
+    # Fetch the most recent dashboard record (which represents the user's current working session)
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
 
-    if not dashboard:
-        # Return an empty structure if no previous session exists, so the frontend initializes empty.
-        return {
-            "id": None, 
-            "name": "New Session",
-            "source": "",
-            "config": {},
-            "results": {}
-        }
+    if not dashboard or not dashboard.layout_data:
+        # Return 404 if no previous session exists, triggering a fresh start on the frontend
+        raise HTTPException(status_code=404, detail="No current analysis session found.")
 
+    # Deserialize the data stored in the database
     layout_data = json.loads(dashboard.layout_data) if dashboard.layout_data else {} 
     
     return {
