@@ -1,642 +1,351 @@
-# src/main.py (FINAL, CORRECTED VERSION for Render Deployment)
 import os
+import sys
 import json
-import asyncio
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Optional, List
+import uuid
 
-from fastapi import FastAPI, Request, Depends, HTTPException, Path
-from fastapi.responses import RedirectResponse, JSONResponse
+# FastAPI and dependencies
+from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from starlette.responses import Response 
+from pydantic import BaseModel, EmailStr
+from jose import jwt, JWTError
+from fastapi.security import OAuth2PasswordBearer
 
-import httpx
-import jwt
-
-# DB imports (Assuming these are in your project structure)
+# Import all models, engine, and helper functions from our consolidated db.py
 from db import (
-    SessionLocal, Token, Settings, Dashboard, AuditLog, 
-    create_audit_log, User, create_default_dashboard,
-    # --- NEW/UPDATED IMPORTS ---
-    AnalysisSession, # Assuming this is your new model for analytics sessions
-    save_analysis_session, # Function to save the new session structure
-    get_analysis_session, # Function to load a single session
-    get_analysis_sessions_db # Updated function to list all sessions
-    # --- END NEW/UPDATED IMPORTS ---
+    User, AuditLog, Dashboard, Settings, Token,
+    Base, engine, SessionLocal,
+    get_user_by_email, create_user_db, create_audit_log,
+    get_user_profile_db, get_latest_dashboard_db, get_user_settings_db,
+    get_audit_logs_db, get_tokens_metadata_db, save_google_token, get_google_token
 )
 
-# Local AI model (Keeping the check for safe initialization)
-try:
-    from gpt4all import GPT4All
-    GPT4ALL_AVAILABLE = True
-except ImportError:
-    GPT4ALL_AVAILABLE = False
+# --- Environment and Configuration ---
+SECRET_KEY = os.environ.get("SECRET_KEY", "THIS_IS_A_VERY_INSECURE_DEFAULT_SECRET_CHANGE_ME_IN_PROD")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+API_TITLE = "AI Data Analyst Backend"
 
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:10000/auth/google/callback")
 
-# -----------------------
-# Load environment variables
-# -----------------------
-load_dotenv()
+# --- Pydantic Schemas ---
 
-CLIENT_ID = os.environ.get("CLIENT_ID")
-CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
-REDIRECT_URI = os.environ.get(
-    "REDIRECT_URI",
-    "https://ai-data-analyst-backend-1nuw.onrender.com/auth/callback"
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class AnalysisSaveRequest(BaseModel):
+    name: str
+    source: str
+    config: dict
+    results: dict
+
+# NEW: Schema for Autosave requests (doesn't require a name)
+class AnalysisAutosaveRequest(BaseModel):
+    source: str
+    config: dict
+    results: dict
+
+# --- Application Initialization ---
+app = FastAPI(title=API_TITLE)
+
+# -------------------- CORS --------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-SCOPES = os.environ.get(
-    "SCOPES",
-    "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly"
-)
 
-# IMPORTANT: Ensure JWT_SECRET is set in Render Env Vars for security!
-JWT_SECRET = os.environ.get("JWT_SECRET", "replace_with_strong_secret") 
-JWT_ALG = "HS256"
-JWT_EXPIRE_DAYS = int(os.environ.get("JWT_EXPIRE_DAYS", "30"))
+# -------------------- DATABASE DEPENDENCY & INITIALIZATION --------------------
 
-app = FastAPI()
-
-# -----------------------
-# Dependency to get DB session
-# -----------------------
 def get_db():
+    """Dependency for providing a synchronous SQLAlchemy database session to FastAPI routes."""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
+DBSession = Annotated[Session, Depends(get_db)]
 
-# -----------------------
-# CORS Configuration
-# -----------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://aianalyst-gamma.vercel.app", 
-    ],
-    allow_credentials=True, 
-    allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type"],
+@app.on_event("startup")
+def on_startup():
+    """CRITICAL: Create database tables if they do not exist."""
+    print("Attempting to create database tables...")
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("Database initialization successful.")
+    except Exception as e:
+        print(f"Database initialization FAILED. Is the DATABASE_URL correct and accessible? Error: {e}")
+
+
+# -------------------- AUTHENTICATION LOGIC --------------------
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+credentials_exception = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Could not validate credentials",
+    headers={"WWW-Authenticate": "Bearer"},
 )
 
+def create_access_token(data: dict):
+    """Creates a JWT token with an expiration time."""
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
-@app.options("/{full_path:path}")
-async def preflight_handler(response: Response):
-    return Response(status_code=204) 
-
-# -----------------------
-# HEALTH CHECK
-# -----------------------
-@app.get("/")
-def health_check():
-    """Simple route for Render/load balancers to check service health."""
-    return {"status": "ok", "service": "AI Data Analyst Backend"}
-
-
-# -----------------------
-# JWT helpers & dependency
-# -----------------------
-security = HTTPBearer()
-
-def create_jwt(user_id: int):
-    payload = {
-        "user_id": user_id,
-        "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRE_DAYS),
-        "iat": datetime.utcnow()
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-def decode_jwt(token: str):
-    try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-    except jwt.ExpiredSignatureError:
-        return None
-    except Exception:
-        return None
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db_session: Session = Depends(get_db)):
-    token = credentials.credentials
-    payload = decode_jwt(token)
-    if not payload or "user_id" not in payload:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    try:
-        user = db_session.query(User).filter(User.id == payload["user_id"]).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        return {"id": user.id, "email": user.email}
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error getting user: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error during authentication")
-
-
-# -----------------------
-# DATABASE HELPERS 
-# -----------------------
-from db import save_token, get_token, get_user_settings, save_user_settings
-
-# -----------------------
-# GOOGLE TOKEN REFRESH
-# -----------------------
-async def get_valid_access_token(user_id):
-    token_data = get_token(user_id)
-    if not token_data:
-        return None
-    access_token = token_data.get("access_token")
-    expires_in = token_data.get("expires_in", 0)
-    refresh_token = token_data.get("refresh_token")
-    
-    # Safely handle created_at string
-    created_at_str = token_data.get("created_at")
-    try:
-        created_at = datetime.fromisoformat(created_at_str)
-    except (TypeError, ValueError):
-        # Fallback for old/missing data
-        created_at = datetime.utcnow() - timedelta(seconds=expires_in + 1)
-
-    if (datetime.utcnow() - created_at).total_seconds() > expires_in - 60 and refresh_token:
-        data = {
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-            "refresh_token": refresh_token,
-            "grant_type": "refresh_token"
-        }
-        async with httpx.AsyncClient() as client:
-            resp = await client.post("https://oauth2.googleapis.com/token", data=data)
-            resp.raise_for_status() # Ensure we handle errors during token refresh
-            new_token = resp.json()
-            token_data["access_token"] = new_token.get("access_token", access_token)
-            token_data["expires_in"] = new_token.get("expires_in", 3600)
-            token_data["created_at"] = datetime.utcnow().isoformat() # Update timestamp
-            save_token(user_id, token_data)
-            access_token = token_data["access_token"]
-    return access_token
-
-# -----------------------
-# GOOGLE OAUTH ROUTES (FIXED: Dynamic Redirect)
-# -----------------------
-@app.get("/auth/google_sheets")
-async def auth_google_sheets(user_id: str, return_path: str = "/dashboard/integrations"): 
-    # Pass the return_path through the Google OAuth flow by encoding it in the 'state' parameter
-    combined_state = json.dumps({"user_id": user_id, "return_path": return_path})
-
-    url = (
-        "https://accounts.google.com/o/oauth2/v2/auth"
-        f"?client_id={CLIENT_ID}"
-        f"&response_type=code"
-        f"&scope={SCOPES}"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&access_type=offline"
-        f"&prompt=consent"
-        f"&state={combined_state}" # Use the combined state
-    )
-    return RedirectResponse(url)
-
-@app.get("/auth/callback")
-async def auth_callback(request: Request, code: str = None, state: str = None):
-    if not code:
-        return JSONResponse({"error": "No code received"}, status_code=400)
-    
-    # Decode the combined 'state' parameter to get user_id and return_path
-    user_id = "unknown"
-    return_path = "/dashboard/integrations" # Default fallback
-    if state:
-        try:
-            state_data = json.loads(state)
-            user_id = state_data.get("user_id", "unknown")
-            return_path = state_data.get("return_path", "/dashboard/integrations") 
-        except json.JSONDecodeError:
-            # Handle legacy/simple state (where state was just user_id)
-            user_id = state
-    
-    data = {
-        "code": code,
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
-        "grant_type": "authorization_code"
-    }
-    async with httpx.AsyncClient() as http_client:
-        resp = await http_client.post("https://oauth2.googleapis.com/token", data=data)
-        token_data = resp.json()
-    
-    try:
-        user_id_int = int(user_id)
-    except ValueError:
-        user_id_int = user_id
-        
-    save_token(user_id_int, token_data)
-    try:
-        create_audit_log(user_id_int, "INTEGRATION_GOOGLE_SUCCESS", ip_address=request.client.host)
-    except Exception:
-        pass
-        
-    # Use the dynamic return_path 
-    frontend_redirect = (
-        f"https://aianalyst-gamma.vercel.app/{return_path.lstrip('/')}" 
-        f"?user_id={user_id}&connected=true&type=google_sheets&_ts={int(datetime.utcnow().timestamp())}"
-    )
-    return RedirectResponse(frontend_redirect)
-
-# -----------------------
-# CONNECTED APPS
-# -----------------------
-@app.get("/connected-apps")
-async def connected_apps(user: dict = Depends(get_current_user)):
-    token_data = get_token(user["id"])
-    return JSONResponse({
-        "google_sheets": bool(token_data),
-        "google_sheets_last_sync": token_data.get("created_at") if token_data else None
-    })
-
-# -----------------------
-# GOOGLE SHEETS ENDPOINTS 
-# -----------------------
-# FIX: Changed path from /sheets/files to /sheets-list/{user_id} and updated response key to 'sheets'
-@app.get("/sheets-list/{user_id}") 
-async def sheets_list(user_id: int, user: dict = Depends(get_current_user)):
-    # NOTE: user_id from path is captured but the actual user ID from the secure JWT (user["id"]) is used.
-    user_id_from_jwt = user["id"]
-    access_token = await get_valid_access_token(user_id_from_jwt)
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Google Sheets not connected. Re-authorize required.")
-        
-    headers = {"Authorization": f"Bearer {access_token}"}
-    # Query Drive for all spreadsheet files, limiting fields to just what we need: id and name
-    params = {"q": "mimeType='application/vnd.google-apps.spreadsheet'", "fields": "files(id,name)"}
-    
-    async with httpx.AsyncClient() as http_client:
-        try:
-            resp = await http_client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
-            resp.raise_for_status() # Raise exception for 4xx or 5xx status codes
-        except httpx.HTTPStatusError as e:
-            print(f"Drive API Error: {e.response.text}")
-            raise HTTPException(status_code=e.response.status_code, detail=f"Google Drive API failed: {e.response.text}")
-        except httpx.RequestError as e:
-            print(f"HTTP Request Error: {e}")
-            raise HTTPException(status_code=500, detail="Failed to connect to Google Drive API.")
-
-    files = resp.json().get("files", [])
-    # FIX: Returning the list under the key 'sheets' to match frontend state logic (setSheetsList(res.data.sheets))
-    return JSONResponse({"sheets": files}) 
-
-@app.get("/sheets/tabs")
-async def get_sheet_tabs(file_id: str, user: dict = Depends(get_current_user)):
-    user_id = user["id"]
-    access_token = await get_valid_access_token(user_id)
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Google Sheets not connected. Re-authorize required.")
-        
-    headers = {"Authorization": f"Bearer {access_token}"}
-    # Use the /spreadsheets endpoint to get sheet metadata, specifically the 'sheets' property
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{file_id}?fields=sheets.properties.title"
-    
-    async with httpx.AsyncClient() as http_client:
-        try:
-            resp = await http_client.get(url, headers=headers)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            print(f"Sheets API Error: {e.response.text}")
-            raise HTTPException(status_code=e.response.status_code, detail=f"Google Sheets API failed: {e.response.text}")
-        except httpx.RequestError as e:
-            print(f"HTTP Request Error: {e}")
-            raise HTTPException(status_code=500, detail="Failed to connect to Google Sheets API.")
-            
-    data = resp.json()
-    # Extract sheet titles (tab names)
-    sheets_data = data.get("sheets", [])
-    tab_names = [sheet["properties"]["title"] for sheet in sheets_data if "properties" in sheet]
-    
-    # Frontend expects the key 'tabs'
-    return JSONResponse({"tabs": tab_names})
-
-@app.post("/sheets/analyze")
-async def analyze_sheet_data(request: Request, user: dict = Depends(get_current_user)):
-    body = await request.json()
-    file_id = body.get("file_id")
-    sheet_tab = body.get("sheet_tab")
-    
-    if not file_id or not sheet_tab:
-        raise HTTPException(status_code=400, detail="Missing 'file_id' or 'sheet_tab'")
-
-    # --- MOCK RESPONSE FOR DATA ANALYSIS ---
-    print(f"Analysis started for File ID: {file_id}, Tab: {sheet_tab}")
-    await asyncio.sleep(1) # Simulate data fetching and processing time
-    
-    return JSONResponse({
-        "message": "Analysis request received. Processing...",
-        "status_url": "/api/analysis/status/123", # Placeholder for polling
-        "file_id": file_id,
-        "sheet_tab": sheet_tab
-    })
-
-# -----------------------
-# GET SHEET DATA (The Endpoint that needed fixing)
-# -----------------------
-# CRITICAL FIX: The frontend sends /sheets/{user_id}/{sheet_id}, so the route MUST reflect this structure.
-@app.get("/sheets/{user_id}/{sheet_id}")
-async def get_sheet_data(user_id: int, sheet_id: str, user: dict = Depends(get_current_user)):
-    # Use the secure user ID from the JWT payload
-    user_id_from_jwt = user["id"]
-    access_token = await get_valid_access_token(user_id_from_jwt)
-    
-    if not access_token:
-        return JSONResponse({"error": "Google Sheets not connected"}, status_code=400)
-        
-    headers = {"Authorization": f"Bearer {access_token}"}
-    
-    # Fetching values from the first tab (defaulting to 'Sheet1'). 
-    # NOTE: You might need to make 'Sheet1' dynamic if you introduce tab selection.
-    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values:batchGet?ranges=Sheet1"
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status() # Ensure we catch 4xx/5xx errors from Google
-            
-        data = resp.json()
-        ranges = data.get("valueRanges", [])
-        values = ranges[0].get("values", []) if ranges else []
-        
-        return JSONResponse({"values": values})
-        
-    except httpx.HTTPStatusError as e:
-        print(f"Google Sheets API Value Fetch Error: {e.response.text}")
-        raise HTTPException(status_code=e.response.status_code, detail=f"Google Sheets API failed to fetch data: {e.response.text}")
-    except Exception as e:
-        print(f"Unexpected error during sheet fetch: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error fetching sheet data.")
-
-
-# -----------------------
-# AUTH ROUTES (SIGNUP / LOGIN / ME)
-# -----------------------
-@app.post("/auth/signup")
-async def signup(request: Request, db_session: Session = Depends(get_db)):
-    body = await request.json()
-    email, password = body.get("email"), body.get("password")
-    if not email or not password:
-        return JSONResponse({"error": "Email and password required"}, status_code=400)
-    
-    # --- Truncate password to 72 bytes for bcrypt compatibility ---
-    safe_password = password.encode('utf-8')[:72].decode('utf-8', 'ignore')
-    # --- END FIX ---
-    
-    try:
-        if db_session.query(User).filter(User.email == email).first():
-            return JSONResponse({"error": "Email already registered"}, status_code=400)
-        
-        # 1. Create the new user record
-        password_hash = User.hash_password(safe_password)
-        new_user = User(email=email, password_hash=password_hash)
-        db_session.add(new_user)
-        db_session.commit()
-        db_session.refresh(new_user)
-        
-        # 2. CREATE DEFAULT DASHBOARD FOR NEW USER (user_id is int)
-        create_default_dashboard(user_id=new_user.id) 
-
-        # 3. Create the JWT token and audit log
-        token = create_jwt(new_user.id)
-        create_audit_log(new_user.id, "SIGNUP", ip_address=request.client.host)
-        return JSONResponse({"message": "Signup successful", "token": token, "user_id": new_user.id})
-    except Exception as e:
-        db_session.rollback()
-        print("Signup error:", e)
-        return JSONResponse({"error": "Signup failed"}, status_code=500)
-
-@app.post("/auth/login")
-async def login(request: Request, db_session: Session = Depends(get_db)):
-    body = await request.json()
-    email, password = body.get("email"), body.get("password")
-    if not email or not password:
-        return JSONResponse({"error": "Email and password required"}, status_code=400)
-    try:
-        user = db_session.query(User).filter(User.email == email).first()
-        if not user or not user.verify_password(password):
-            return JSONResponse({"error": "Invalid email or password"}, status_code=401)
-        token = create_jwt(user.id)
-        create_audit_log(user.id, "LOGIN", ip_address=request.client.host)
-        return JSONResponse({"message": "Login successful", "token": token, "user_id": user.id})
-    except Exception as e:
-        print("Login error:", e)
-        return JSONResponse({"error": "Login failed"}, status_code=500)
-
-@app.get("/auth/me")
-async def me(user: dict = Depends(get_current_user)):
-    return JSONResponse({"id": user["id"], "email": user["email"]})
-
-# -----------------------
-# USER SETTINGS ENDPOINTS
-# -----------------------
-@app.get("/api/settings")
-async def get_settings_endpoint(user: dict = Depends(get_current_user)):
-    settings = get_user_settings(user["id"])
-    return JSONResponse(settings)
-
-@app.post("/api/settings")
-async def save_settings_endpoint(request: Request, user: dict = Depends(get_current_user)):
-    try:
-        settings_data = await request.json()
-        result = save_user_settings(user["id"], settings_data)
-        return JSONResponse(result)
-    except Exception as e:
-        return JSONResponse({"error": f"Failed to save settings: {e}"}, status_code=500)
-
-@app.post("/api/cache/purge")
-async def purge_cache_endpoint(user: dict = Depends(get_current_user)):
-    print(f"Server-side cache purge executed for user: {user['id']}")
-    return JSONResponse({"message": "Server-side cache purge simulated successfully."})
-
-# -----------------------
-# ANALYSIS SESSION ENDPOINTS (REPLACING OLD DASHBOARD SAVE/LOAD)
-# -----------------------
-
-@app.get("/api/analysis/sessions")
-async def get_analysis_sessions_endpoint(user: dict = Depends(get_current_user)):
-    # Uses the new function to fetch structured analysis session summaries
-    sessions = get_analysis_sessions_db(user["id"])
-    if not sessions:
-        return JSONResponse({
-            "message": "No saved sessions found. Please create your first analysis.",
-            "sessions": [], "action": "PROMPT_NEW_ANALYSIS"
-        })
-    return JSONResponse({"sessions": sessions})
-
-@app.post("/api/analysis/save")
-async def save_analysis_session_endpoint(request: Request, user: dict = Depends(get_current_user)):
-    body = await request.json()
-    session_data = body.get("session_data")
-    session_id = body.get("session_id") # Optional: used for update
-    session_name = body.get("session_name", "Untitled Analysis")
-    
-    if not session_data:
-        raise HTTPException(status_code=400, detail="Missing session_data in request body.")
-
-    try:
-        # Delegate saving/updating to the database helper function
-        new_id = save_analysis_session(
-            user_id=user["id"],
-            session_name=session_name,
-            session_data=session_data,
-            session_id=session_id
+def authenticate_user(db: Session, email: str, password: str):
+    """Checks credentials and returns the User object or raises an error."""
+    user = get_user_by_email(db, email)
+    if not user or not user.verify_password(password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, 
+            detail="Incorrect email or password"
         )
-        
-        create_audit_log(user["id"], "ANALYSIS_SAVE", ip_address=request.client.host)
-        return JSONResponse({"message": "Analysis session saved successfully", "id": new_id})
-    except Exception as e:
-        print("Save analysis session error:", e)
-        raise HTTPException(status_code=500, detail=f"Failed to save analysis session: {e}")
+    return user
 
-
-@app.get("/api/analysis/session/{session_id}")
-async def get_analysis_session_endpoint(session_id: int = Path(..., description="The ID of the analysis session to load"), 
-                                        user: dict = Depends(get_current_user)):
+def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]):
+    """Dependency that validates the token and returns the user ID (int)."""
     try:
-        # Delegate loading to the database helper function
-        session = get_analysis_session(user["id"], session_id)
-        
-        if not session:
-            raise HTTPException(status_code=404, detail=f"Analysis session with ID {session_id} not found.")
-
-        return JSONResponse({"session": session})
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id_str: str = payload.get("sub")
+        if user_id_str is None:
+            raise credentials_exception
+        user_id = int(user_id_str)
+    except (JWTError, ValueError):
+        raise credentials_exception
     
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("Load analysis session error:", e)
-        raise HTTPException(status_code=500, detail=f"Failed to load analysis session: {e}")
+    return user_id
 
-
-# -----------------------
-# DEPRECATED DASHBOARD ENDPOINTS (Keeping for compatibility for now)
-# -----------------------
-@app.get("/api/dashboard/sessions")
-async def get_dashboard_sessions_endpoint_legacy(user: dict = Depends(get_current_user)):
-    return await get_analysis_sessions_endpoint(user) # Redirects to the new endpoint
+def get_current_user(db: DBSession, user_id: Annotated[int, Depends(get_current_user_id)]):
+    """Dependency that returns the user dictionary for the current session."""
+    user = get_user_profile_db(db, user_id)
+    if user is None:
+        raise credentials_exception
     
+    return {"id": user.id, "email": user.email}
 
-@app.post("/api/dashboard/save")
-async def save_dashboard_endpoint(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
-    # This is the legacy endpoint from your previous structure.
-    body = await request.json()
-    name, layout = body.get("name", "Untitled Dashboard"), body.get("layout", {})
-    try:
-        new_dash = Dashboard(user_id=user["id"], name=name, layout_data=json.dumps(layout), last_accessed=datetime.utcnow())
-        db_session.add(new_dash)
-        db_session.commit()
-        db_session.refresh(new_dash)
-        create_audit_log(user["id"], "DASHBOARD_SAVE", ip_address=request.client.host)
-        return JSONResponse({"message": "Dashboard saved (Legacy)", "id": new_dash.id})
-    except Exception as e:
-        db_session.rollback()
-        print("Save dashboard error:", e)
-        return JSONResponse({"error": "Failed to save dashboard"}, status_code=500)
+AuthUser = Annotated[dict, Depends(get_current_user)]
+AuthUserID = Annotated[int, Depends(get_current_user_id)]
 
-# -----------------------
-# SECURITY ENDPOINTS
-# -----------------------
-@app.post("/api/security/change-password")
-async def change_password(request: Request, user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
-    body = await request.json()
-    new_password = body.get("new_password")
-    if not new_password:
-        return JSONResponse({"error": "New password required"}, status_code=400)
+
+# -------------------- AUTH ROUTES --------------------
+
+@app.post("/auth/signup", tags=["Auth"])
+def signup(payload: UserCreate, db: DBSession, request: Request):
+    if get_user_by_email(db, payload.email):
+         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+         
+    user = create_user_db(db, payload.email, payload.password)
+    db.commit() 
     
-    safe_new_password = new_password.encode('utf-8')[:72].decode('utf-8', 'ignore')
+    token = create_access_token({"sub": str(user.id)})
     
-    try:
-        user_rec = db_session.query(User).filter(User.id == user["id"]).first()
-        if not user_rec:
-            return JSONResponse({"error": "User not found"}, status_code=404)
-            
-        user_rec.password_hash = User.hash_password(safe_new_password)
-        db_session.commit()
-        create_audit_log(user["id"], "PASSWORD_CHANGE", ip_address=request.client.host)
-        return JSONResponse({"message": "Password change successful"})
-    except Exception as e:
-        db_session.rollback()
-        print("Password change error:", e)
-        return JSONResponse({"error": "Failed to change password"}, status_code=500)
+    create_audit_log(db, user_id=user.id, event_type="SIGNUP_SUCCESS", ip_address=request.client.host if request.client else "unknown")
+    db.commit()
 
-@app.post("/api/security/toggle-2fa")
-async def toggle_2fa_mock(request: Request, user: dict = Depends(get_current_user)):
-    body = await request.json()
-    is_enabled = body.get("enabled", False)
-    event_type = "2FA_ENABLED" if is_enabled else "2FA_DISABLED"
-    create_audit_log(user["id"], event_type, ip_address=request.client.host)
-    return JSONResponse({"message": f"2FA status set to {is_enabled} (Simulated)."})
+    return { "user_id": user.id, "email": user.email, "token": token }
 
-@app.get("/api/security/logins")
-async def get_recent_logins_endpoint(user: dict = Depends(get_current_user), db_session: Session = Depends(get_db)):
-    try:
-        logs = db_session.query(AuditLog).filter(AuditLog.user_id == user["id"]).order_by(AuditLog.timestamp.desc()).limit(10).all()
-        formatted_logs = [
-            {"id": log.id, "event": log.event_type, "time": log.timestamp.isoformat(),
-             "location": f"IP: {log.ip_address}", "device": log.device_info or "Web Browser",
-             "suspicious": log.is_suspicious}
-            for log in logs if log.event_type.startswith("LOGIN") or log.event_type.startswith("PASSWORD")
-        ]
-        return JSONResponse(formatted_logs)
-    except Exception as e:
-        print(f"Error retrieving audit logs: {e}")
-        return JSONResponse({"error": "Failed to retrieve logs"}, status_code=500)
 
-# -----------------------
-# GPT4ALL AI MODEL
-# -----------------------
-if GPT4ALL_AVAILABLE:
-    MODEL_FILE = "orca-mini-3b-gguf2-q4_0.gguf2"
-    MODEL_PATH = os.path.join("models", MODEL_FILE)
+@app.post("/auth/login", tags=["Auth"])
+def login(payload: UserLogin, db: DBSession, request: Request):
+    user = authenticate_user(db, payload.email, payload.password)
+    token = create_access_token({"sub": str(user.id)})
     
-    try:
-        if not os.path.isfile(MODEL_PATH):
-            print(f"ERROR: Model file missing: {MODEL_PATH}")
-            gpt_model = None
-        else:
-            gpt_model = GPT4All(model_name=MODEL_FILE, model_path="./models")
-    except Exception as e:
-        print(f"WARNING: GPT4All initialization failed: {e}. AI endpoint will be disabled.")
-        gpt_model = None
-else:
-    print("WARNING: GPT4All library not imported. AI endpoint will be disabled.")
-    gpt_model = None
+    create_audit_log(db, user_id=user.id, event_type="LOGIN_SUCCESS", ip_address=request.client.host if request.client else "unknown")
+    db.commit()
+
+    return { "user_id": user.id, "email": user.email, "token": token }
 
 
-@app.post("/ai/analyze")
-async def ai_analyze(request: Request):
-    if gpt_model is None:
-        return JSONResponse({"error": "Local AI model not available or initialized"}, status_code=500)
+@app.get("/auth/me", tags=["Auth"])
+def me(user: AuthUser):
+    return { "user_id": user["id"], "email": user["email"] }
+
+# -------------------- GOOGLE OAUTH (PLACEHOLDER) --------------------
+
+# Mock functions for Google Sheets logic (since external libraries are not used here)
+def get_google_auth_url(state: str, return_path: str):
+    return "https://accounts.google.com/o/oauth2/v2/auth?dummy_url"
+
+def exchange_code_for_token(code: str):
+    return {"access_token": f"mock_token_{uuid.uuid4()}", "refresh_token": None}
+
+def fetch_user_sheets(token: dict):
+    return [{"id": "sheet1", "title": "Sales Data 2025"}, {"id": "sheet2", "title": "Marketing Spend"}]
+
+def fetch_sheet_data(token: dict, sheet_id: str):
+    return {"headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}
+
+@app.get("/auth/google_sheets", tags=["Integrations"])
+def google_oauth_start(
+    return_path: str = "/dashboard/integrations",
+    user: AuthUser = Depends(get_current_user)
+):
+    state = str(uuid.uuid4())
+    auth_url = get_google_auth_url(state=state, return_path=return_path)
+    return {"auth_url": auth_url}
+
+
+@app.get("/auth/google/callback", tags=["Integrations"])
+def google_oauth_callback(
+    code: str,
+    state: str,
+    user: AuthUser,
+    db: DBSession,
+    request: Request
+):
+    token_data = exchange_code_for_token(code)
+    save_google_token(db, user["id"], token_data)
+
+    create_audit_log(db, user_id=user["id"], event_type="GOOGLE_OAUTH_CONNECTED", ip_address=request.client.host if request.client else "unknown")
+    db.commit()
+
+    return {"success": True, "detail": "Integration successful."}
+
+# -------------------- GOOGLE SHEETS ACCESS --------------------
+
+@app.get("/sheets-list", tags=["Integrations"])
+def sheets_list(user: AuthUser, db: DBSession):
+    token = get_google_token(db, user["id"])
+    if not token:
+        raise HTTPException(status_code=403, detail="Google not connected. Please authorize.")
+
+    sheets = fetch_user_sheets(token)
+    return {"sheets": sheets}
+
+
+@app.get("/sheets/{sheet_id}", tags=["Integrations"])
+def get_sheet(sheet_id: str, user: AuthUser, db: DBSession):
+    token = get_google_token(db, user["id"])
+    if not token:
+        raise HTTPException(status_code=403, detail="Google not connected. Please authorize.")
+
+    data = fetch_sheet_data(token, sheet_id)
+    return {"data": data}
+
+# -------------------- ANALYSIS SESSIONS --------------------
+
+# Existing endpoint for explicit save
+@app.post("/analysis/save", tags=["Analysis"])
+def save_analysis(payload: AnalysisSaveRequest, user_id: AuthUserID, db: DBSession, request: Request):
     
-    body = await request.json()
-    kpis, categories, row_count = body.get("kpis"), body.get("categories"), body.get("rowCount", 0)
-    if not kpis:
-        return JSONResponse({"error": "No KPIs provided"}, status_code=400)
-        
-    prompt = f"""
-You are an expert business analyst.
-Dataset Rows: {row_count}
-KPIs: {json.dumps(kpis, indent=2)}
-Categories: {json.dumps(categories, indent=2)}
-Provide:
-- Overview
-- Trends
-- Increasing/decreasing
-- Profitability signals
-- Anomalies
-- Risks
-- Opportunities
-- Actionable insights
-"""
-    try:
-        output = gpt_model.generate(prompt, max_tokens=400)
-        return JSONResponse({"analysis": output})
-    except Exception as e:
-        print("GPT4All error:", e)
-        return JSONResponse({"error": str(e)}, status_code=500)
+    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
+
+    layout_data_json = json.dumps({"config": payload.config, "results": payload.results, "source": payload.source})
+
+    if dashboard:
+        dashboard.name = payload.name
+        dashboard.layout_data = layout_data_json
+        dashboard.last_accessed = datetime.now(timezone.utc)
+    else:
+        dashboard = Dashboard(
+            user_id=user_id,
+            name=payload.name,
+            layout_data=layout_data_json
+        )
+        db.add(dashboard)
+    
+    db.commit()
+
+    create_audit_log(db, user_id=user_id, event_type="ANALYSIS_SAVED", ip_address=request.client.host if request.client else "unknown")
+    db.commit()
+
+    return {"session_id": dashboard.id}
+
+
+# NEW: Endpoint for implicit autosave (used when navigating away or clearing)
+@app.post("/analysis/autosave", tags=["Analysis"])
+def autosave_analysis(payload: AnalysisAutosaveRequest, user_id: AuthUserID, db: DBSession):
+    """Saves the current in-progress analysis to the user's implicit session."""
+    
+    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
+
+    layout_data_json = json.dumps({"config": payload.config, "results": payload.results, "source": payload.source})
+
+    if dashboard:
+        # Preserve existing name or use a default marker
+        dashboard.name = dashboard.name if dashboard.name != "Implicit Working Session" else "Implicit Working Session"
+        dashboard.layout_data = layout_data_json
+        dashboard.last_accessed = datetime.now(timezone.utc)
+    else:
+        dashboard = Dashboard(
+            user_id=user_id,
+            name="Implicit Working Session",
+            layout_data=layout_data_json
+        )
+        db.add(dashboard)
+    
+    db.commit()
+
+    return {"session_id": dashboard.id}
+
+
+# NEW: Endpoint for autoload (used when navigating to the page)
+@app.get("/analysis/current", tags=["Analysis"])
+def get_current_analysis(user_id: AuthUserID, db: DBSession):
+    """Retrieves the most recently accessed dashboard/session for the user."""
+
+    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
+
+    if not dashboard:
+        # Return an empty structure if no previous session exists, so the frontend initializes empty.
+        return {
+            "id": None, 
+            "name": "New Session",
+            "source": "",
+            "config": {},
+            "results": {}
+        }
+
+    layout_data = json.loads(dashboard.layout_data) if dashboard.layout_data else {} 
+    
+    return {
+        "id": dashboard.id,
+        "name": dashboard.name,
+        "source": layout_data.get("source"),
+        "config": layout_data.get("config", {}),
+        "results": layout_data.get("results", {})
+    }
+
+
+@app.get("/analysis/sessions", tags=["Analysis"])
+def list_analysis_sessions(user_id: AuthUserID, db: DBSession):
+    dashboards = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).all()
+    
+    sessions = []
+    for d in dashboards:
+        layout_data = json.loads(d.layout_data) if d.layout_data else {} 
+        sessions.append({
+            "id": d.id,
+            "name": d.name,
+            "last_accessed": d.last_accessed.isoformat() if d.last_accessed else None,
+            "source": layout_data.get("source"),
+            "config_preview": layout_data.get("config", {}) 
+        })
+    
+    return {"sessions": sessions}
+
+# -------------------- DASHBOARDS --------------------
+
+@app.get("/dashboards", tags=["Dashboard"])
+def dashboards(user_id: AuthUserID, db: DBSession):
+    return list_analysis_sessions(user_id, db)
+
+# -------------------- HEALTH --------------------
+
+@app.get("/health", tags=["System"])
+def health():
+    return {"status": "ok", "api_version": "1.0"}
