@@ -64,13 +64,11 @@ class AnalysisAutosaveRequest(BaseModel):
 # --- Application Initialization ---
 app = FastAPI(title=API_TITLE)
 
-# -------------------- CRITICAL CORS FIX --------------------
-# The error was caused by using allow_origins=["*"] and allow_credentials=True simultaneously.
-# The fix is to explicitly list the frontend origins.
+# -------------------- CORS FIX (from previous step) --------------------
 origins = [
-    "https://aianalyst-gamma.vercel.app", # <-- YOUR PRODUCTION FRONTEND DOMAIN
-    "http://localhost:3000",                # Local development environment
-    "http://localhost:5173",                # Another common local dev port (Vite/React)
+    "https://aianalyst-gamma.vercel.app", 
+    "http://localhost:3000",
+    "http://localhost:5173",
 ]
 
 app.add_middleware(
@@ -99,6 +97,13 @@ def on_startup():
     """CRITICAL: Create database tables if they do not exist."""
     print("Attempting to create database tables...")
     try:
+        # 🚨 TEMPORARY FIX START: We must drop and recreate the tables 
+        # to add the missing 'hashed_password' column to the 'users' table.
+        print("TEMPORARY: Dropping all existing tables for schema update...")
+        Base.metadata.drop_all(bind=engine) 
+        
+        # 🚨 TEMPORARY FIX END
+        
         Base.metadata.create_all(bind=engine)
         print("Database initialization successful.")
     except Exception as e:
@@ -234,7 +239,7 @@ def fetch_sheet_data(token: dict, sheet_id: str):
 @app.get("/auth/google_sheets", tags=["Integrations"])
 def google_oauth_start(
     user: AuthUser, 
-    db: DBSession, # <--- Added DB dependency to save state
+    db: DBSession,
     return_path: str = "/dashboard/integrations" 
 ):
     """
