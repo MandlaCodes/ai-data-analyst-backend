@@ -12,6 +12,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from fastapi.responses import RedirectResponse
+# CRITICAL: If you use EmailStr, you MUST have the pydantic[email] dependency installed.
 from pydantic import BaseModel, EmailStr 
 from jose import jwt, JWTError
 from fastapi.security import OAuth2PasswordBearer
@@ -24,8 +25,8 @@ from db import (
     get_user_profile_db, get_latest_dashboard_db, get_user_settings_db,
     get_audit_logs_db, get_tokens_metadata_db, 
     save_google_token, get_google_token, 
-    # NEW: Function to temporarily store and retrieve the state to get the user ID
-    save_state_to_db, get_user_id_from_state_db, delete_state_from_db
+    save_state_to_db, get_user_id_from_state_db, delete_state_from_db,
+    verify_password_helper # <--- CRITICAL FIX: NEW IMPORT FOR RELIABLE PASSWORD CHECK
 )
 
 # --- Environment and Configuration ---
@@ -64,7 +65,7 @@ class AnalysisAutosaveRequest(BaseModel):
 # --- Application Initialization ---
 app = FastAPI(title=API_TITLE)
 
-# -------------------- CORS FIX (from previous step) --------------------
+# -------------------- CORS FIX --------------------
 origins = [
     "https://aianalyst-gamma.vercel.app", 
     "http://localhost:3000",
@@ -97,8 +98,7 @@ def on_startup():
     """CRITICAL: Create database tables if they do not exist."""
     print("Attempting to create database tables...")
     try:
-        # 🚨 TEMPORARY FIX START: We must drop and recreate the tables 
-        # to add the missing 'hashed_password' column to the 'users' table.
+        # 🚨 TEMPORARY FIX START: Must drop and recreate tables to fix the 'hashed_password' column.
         print("TEMPORARY: Dropping all existing tables for schema update...")
         Base.metadata.drop_all(bind=engine) 
         
@@ -130,7 +130,9 @@ def create_access_token(data: dict):
 def authenticate_user(db: Session, email: str, password: str):
     """Checks credentials and returns the User object or raises an error."""
     user = get_user_by_email(db, email)
-    if not user or not user.verify_password(password):
+    
+    # 🚨 CRITICAL FIX: Use the standalone helper function for verification
+    if not user or not verify_password_helper(password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Incorrect email or password"
@@ -213,7 +215,7 @@ def get_google_auth_url(state: str):
         "scope": GOOGLE_SCOPES,
         "access_type": "offline",
         "prompt": "consent",
-        "state": state # Only the UUID state is sent to Google
+        "state": state 
     }
     
     # Safely encode parameters

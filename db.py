@@ -4,7 +4,7 @@ from typing import Optional, List
 from passlib.context import CryptContext
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Mapped, mapped_column, Session
-import uuid # <-- NEW: Needed for StateToken UUID generation
+import uuid 
 
 # --- Configuration ---
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./test.db") 
@@ -40,11 +40,11 @@ class User(Base):
     audit_logs = relationship("AuditLog", back_populates="user")
     settings = relationship("Settings", back_populates="user", uselist=False)
     tokens = relationship("Token", back_populates="user")
-    state_tokens = relationship("StateToken", back_populates="user") # <-- NEW: Relationship to StateToken
+    state_tokens = relationship("StateToken", back_populates="user")
 
-    # Helper method for password verification
-    def verify_password(self, password: str):
-        return pwd_context.verify(password, self.hashed_password)
+    # NOTE: The verify_password method has been removed to avoid ORM/threading issues.
+    # Verification is now handled by the standalone helper function below.
+
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -230,3 +230,13 @@ def delete_state_from_db(db: Session, state_uuid: str):
     """Cleans up the state record after a successful or failed callback."""
     db.query(StateToken).filter(StateToken.state_uuid == state_uuid).delete()
     # Note: db.commit() is done in main.py
+
+# -------------------- CRITICAL PASSWORD VERIFICATION HELPER --------------------
+
+def verify_password_helper(plain_password: str, hashed_password: str) -> bool:
+    """
+    
+    Explicitly verifies a plain password against a hashed one using the global CryptContext.
+    This resolves the issue where verification fails due to ORM session context/threading.
+    """
+    return pwd_context.verify(plain_password, hashed_password)
