@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List
 import uuid
+# CRITICAL: Import urlencode for safe URL construction
+from urllib.parse import urlencode 
 
 # FastAPI and dependencies
 from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
@@ -33,6 +35,9 @@ API_TITLE = "AI Data Analyst Backend"
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI", "http://localhost:10000/auth/google/callback")
+# Define the scopes needed for Google Sheets access
+GOOGLE_SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly profile email"
+
 
 # --- Pydantic Schemas ---
 
@@ -154,8 +159,8 @@ AuthUserID = Annotated[int, Depends(get_current_user_id)]
 @app.post("/auth/signup", tags=["Auth"])
 def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
-         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
-         
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
+          
     user = create_user_db(db, payload.email, payload.password)
     db.commit() 
     
@@ -182,13 +187,33 @@ def login(payload: UserLogin, db: DBSession, request: Request):
 def me(user: AuthUser):
     return { "user_id": user["id"], "email": user["email"] }
 
-# -------------------- GOOGLE OAUTH (PLACEHOLDER) --------------------
+# -------------------- GOOGLE OAUTH --------------------
 
-# Mock functions for Google Sheets logic (since external libraries are not used here)
+# --- CORRECTED get_google_auth_url IMPLEMENTATION ---
 def get_google_auth_url(state: str, return_path: str):
-    # This should construct a real OAuth URL using the client ID/secret
-    return "https://accounts.google.com/o/oauth2/v2/auth?dummy_url"
+    """
+    Constructs the correct Google OAuth 2.0 authorization URL with all required parameters.
+    This fixes the 'Required parameter is missing: response_type' error.
+    """
+    
+    AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+    
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",    # CRITICAL: Missing parameter
+        "scope": GOOGLE_SCOPES,     # Defined at the top
+        "access_type": "offline",   # Needed to get a refresh token
+        "prompt": "consent",        # Forces user to grant consent
+        "state": f"{state}|{return_path}" # Combine state and return path for callback
+    }
+    
+    # Safely encode parameters
+    query_string = urlencode(params)
 
+    return f"{AUTH_BASE_URL}?{query_string}"
+    
+# Mock functions for Google Sheets logic (since external libraries are not used here)
 def exchange_code_for_token(code: str):
     # This should call the Google token endpoint
     return {"access_token": f"mock_token_{uuid.uuid4()}", "refresh_token": None}
@@ -223,6 +248,7 @@ def google_oauth_callback(
 ):
     """Handles the callback from Google, exchanges the code for a token, and saves it."""
     # NOTE: In a real app, you would validate the state and handle CSRF protection here.
+    # State handling would involve parsing the combined state and return_path
     token_data = exchange_code_for_token(code)
     save_google_token(db, user["id"], token_data)
 
@@ -230,6 +256,31 @@ def google_oauth_callback(
     db.commit()
 
     return {"success": True, "detail": "Integration successful."}
+
+
+# --- NEW: /connected-apps ENDPOINT ---
+@app.get("/connected-apps", tags=["Integrations"])
+def get_connected_apps_status(user: AuthUser, db: DBSession):
+    """
+    Retrieves the connection status for all external services.
+    This resolves the 404 error from the frontend's initial status check.
+    """
+    user_id = user["id"]
+    
+    # 1. Check Google Sheets Token
+    google_token = get_google_token(db, user_id)
+    
+    response = {
+        "google_sheets": False,
+        "google_sheets_last_sync": None,
+    }
+    
+    if google_token:
+        # Assuming your Token model has a 'created_at' or similar field
+        response["google_sheets"] = True
+        response["google_sheets_last_sync"] = google_token.created_at.isoformat() if google_token.created_at else None
+        
+    return response
 
 # -------------------- GOOGLE SHEETS ACCESS --------------------
 
