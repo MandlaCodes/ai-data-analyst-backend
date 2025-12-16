@@ -10,7 +10,12 @@ import uuid
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./test.db") 
 
 # For Bcrypt hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["bcrypt"], 
+    deprecated="auto",
+    # 🚨 CRITICAL FIX: Explicitly set the hash property to ensure proper verification.
+    bcrypt__ident="2b" 
+)
 
 # --- SQLAlchemy Setup ---
 # Set pool_pre_ping to handle idle connection issues in production
@@ -41,9 +46,6 @@ class User(Base):
     settings = relationship("Settings", back_populates="user", uselist=False)
     tokens = relationship("Token", back_populates="user")
     state_tokens = relationship("StateToken", back_populates="user")
-
-    # NOTE: The verify_password method has been removed to avoid ORM/threading issues.
-    # Verification is now handled by the standalone helper function below.
 
 
 class AuditLog(Base):
@@ -126,6 +128,11 @@ class StateToken(Base):
 
 def create_user_db(db: Session, email: str, password: str) -> User:
     hashed_password = pwd_context.hash(password)
+    
+    # 🚨 TEMPORARY DIAGNOSTIC PRINT 🚨
+    print(f"DIAGNOSTIC: Signup Hash Created: '{hashed_password}'")
+    # 🚨 END TEMPORARY DIAGNOSTIC PRINT 🚨
+
     db_user = User(email=email, hashed_password=hashed_password)
     db.add(db_user)
     # Note: caller (main.py) must commit
@@ -235,7 +242,6 @@ def delete_state_from_db(db: Session, state_uuid: str):
 
 def verify_password_helper(plain_password: str, hashed_password: str) -> bool:
     """
-    
     Explicitly verifies a plain password against a hashed one using the global CryptContext.
     This resolves the issue where verification fails due to ORM session context/threading.
     """

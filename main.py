@@ -12,7 +12,6 @@ from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from fastapi.responses import RedirectResponse
-# CRITICAL: If you use EmailStr, you MUST have the pydantic[email] dependency installed.
 from pydantic import BaseModel, EmailStr 
 from jose import jwt, JWTError
 from fastapi.security import OAuth2PasswordBearer
@@ -131,12 +130,28 @@ def authenticate_user(db: Session, email: str, password: str):
     """Checks credentials and returns the User object or raises an error."""
     user = get_user_by_email(db, email)
     
-    # 🚨 CRITICAL FIX: Use the standalone helper function for verification
-    if not user or not verify_password_helper(password, user.hashed_password):
+    # 🚨 CRITICAL FIX & DIAGNOSTICS START 🚨
+    if user:
+        # Perform the verification check using the reliable helper function
+        is_verified = verify_password_helper(password, user.hashed_password)
+        
+        print(f"DIAGNOSTIC: Login for {email}. Raw Password: '{password}'")
+        print(f"DIAGNOSTIC: DB HASH: '{user.hashed_password}'")
+        print(f"DIAGNOSTIC: Password Verified: {is_verified}")
+        
+        if not is_verified:
+             raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, 
+                detail="Incorrect email or password"
+            )
+    else:
+        print(f"DIAGNOSTIC: User not found for email: {email}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Incorrect email or password"
         )
+    # 🚨 CRITICAL FIX & DIAGNOSTICS END 🚨
+        
     return user
 
 def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]):
