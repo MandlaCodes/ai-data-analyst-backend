@@ -11,8 +11,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from fastapi.responses import RedirectResponse # <--- Added RedirectResponse
-# CRITICAL: If you use EmailStr, you MUST have the pydantic[email] dependency installed.
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr 
 from jose import jwt, JWTError
 from fastapi.security import OAuth2PasswordBearer
@@ -26,7 +25,7 @@ from db import (
     get_audit_logs_db, get_tokens_metadata_db, 
     save_google_token, get_google_token, 
     # NEW: Function to temporarily store and retrieve the state to get the user ID
-    save_state_to_db, get_user_id_from_state_db, delete_state_from_db # <--- ASSUMED NEW DB FUNCTIONS
+    save_state_to_db, get_user_id_from_state_db, delete_state_from_db
 )
 
 # --- Environment and Configuration ---
@@ -65,14 +64,23 @@ class AnalysisAutosaveRequest(BaseModel):
 # --- Application Initialization ---
 app = FastAPI(title=API_TITLE)
 
-# -------------------- CORS --------------------
+# -------------------- CRITICAL CORS FIX --------------------
+# The error was caused by using allow_origins=["*"] and allow_credentials=True simultaneously.
+# The fix is to explicitly list the frontend origins.
+origins = [
+    "https://aianalyst-gamma.vercel.app", # <-- YOUR PRODUCTION FRONTEND DOMAIN
+    "http://localhost:3000",                # Local development environment
+    "http://localhost:5173",                # Another common local dev port (Vite/React)
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=origins, 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# -------------------- END CORS FIX --------------------
 
 # -------------------- DATABASE DEPENDENCY & INITIALIZATION --------------------
 
@@ -186,7 +194,7 @@ def me(user: AuthUser):
 # -------------------- GOOGLE OAUTH --------------------
 
 # --- CORRECTED get_google_auth_url IMPLEMENTATION ---
-def get_google_auth_url(state: str): # NOTE: return_path is not needed here, stored in state
+def get_google_auth_url(state: str):
     """
     Constructs the correct Google OAuth 2.0 authorization URL.
     """
@@ -263,7 +271,7 @@ def google_oauth_callback(
 
     try:
         # 1. Retrieve user_id and return_path using the state UUID from the DB
-        state_data = get_user_id_from_state_db(db, state_uuid=state) # <--- ASSUMED DB FUNCTION
+        state_data = get_user_id_from_state_db(db, state_uuid=state)
         
         if not state_data:
             raise HTTPException(status_code=400, detail="Invalid or expired state parameter.")
@@ -278,7 +286,7 @@ def google_oauth_callback(
         save_google_token(db, user_id, token_data)
         
         # 4. Clean up the temporary state record
-        delete_state_from_db(db, state_uuid=state) # <--- ASSUMED DB FUNCTION
+        delete_state_from_db(db, state_uuid=state)
         
         create_audit_log(db, user_id=user_id, event_type="GOOGLE_OAUTH_CONNECTED", ip_address=request.client.host if request.client else "unknown")
         db.commit()
