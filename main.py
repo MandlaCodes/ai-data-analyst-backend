@@ -4,7 +4,6 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List
 import uuid
-# CRITICAL: Import urlencode for safe URL construction
 from urllib.parse import urlencode 
 
 # FastAPI and dependencies
@@ -25,7 +24,7 @@ from db import (
     get_audit_logs_db, get_tokens_metadata_db, 
     save_google_token, get_google_token, 
     save_state_to_db, get_user_id_from_state_db, delete_state_from_db,
-    verify_password_helper # <--- CRITICAL FIX: NEW IMPORT FOR RELIABLE PASSWORD CHECK
+    verify_password_helper # <--- CRITICAL: Importing the reliable password check
 )
 
 # --- Environment and Configuration ---
@@ -64,7 +63,7 @@ class AnalysisAutosaveRequest(BaseModel):
 # --- Application Initialization ---
 app = FastAPI(title=API_TITLE)
 
-# -------------------- CORS FIX --------------------
+# -------------------- CORS Configuration --------------------
 origins = [
     "https://aianalyst-gamma.vercel.app", 
     "http://localhost:3000",
@@ -78,7 +77,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# -------------------- END CORS FIX --------------------
 
 # -------------------- DATABASE DEPENDENCY & INITIALIZATION --------------------
 
@@ -97,14 +95,10 @@ def on_startup():
     """CRITICAL: Create database tables if they do not exist."""
     print("Attempting to create database tables...")
     try:
-        # 🚨 TEMPORARY FIX START: Must drop and recreate tables to fix the 'hashed_password' column.
-        print("TEMPORARY: Dropping all existing tables for schema update...")
-        Base.metadata.drop_all(bind=engine) 
-        
-        # 🚨 TEMPORARY FIX END
-        
-        Base.metadata.create_all(bind=engine)
-        print("Database initialization successful.")
+        # 🟢 FINAL CLEANUP COMPLETE: The Base.metadata.drop_all(bind=engine) is REMOVED.
+        # Tables will now be created if they don't exist, and existing data will be preserved.
+        Base.metadata.create_all(bind=engine) 
+        print("Database initialization successful. Existing data preserved.")
     except Exception as e:
         print(f"Database initialization FAILED. Is the DATABASE_URL correct and accessible? Error: {e}")
 
@@ -135,6 +129,7 @@ def authenticate_user(db: Session, email: str, password: str):
         # Perform the verification check using the reliable helper function
         is_verified = verify_password_helper(password, user.hashed_password)
         
+        # Keep prints for final check
         print(f"DIAGNOSTIC: Login for {email}. Raw Password: '{password}'")
         print(f"DIAGNOSTIC: DB HASH: '{user.hashed_password}'")
         print(f"DIAGNOSTIC: Password Verified: {is_verified}")
@@ -145,6 +140,7 @@ def authenticate_user(db: Session, email: str, password: str):
                 detail="Incorrect email or password"
             )
     else:
+        # User not found (which was the issue in the last attempt)
         print(f"DIAGNOSTIC: User not found for email: {email}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
