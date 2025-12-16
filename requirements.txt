@@ -1,17 +1,30 @@
-fastapi==0.116.1
+# --- FastAPI Framework & ASGI Server ---
 uvicorn==0.35.0
+fastapi==0.110.1
 httpx==0.28.1
-python-dotenv==1.1.1
+
+# --- Database Drivers & ORM ---
 sqlalchemy==2.0.44
 databases==0.9.0
-gpt4all==2.7.0
-requests==2.32.3
-PyJWT==2.10.1
-python-jose
-tqdm==4.67.1
-typing-extensions==4.15.0
-passlib==1.7.4
-bcrypt==4.1.3
 psycopg2-binary
 asyncpg
-pydantic[email]
+python-dotenv==1.1.1
+
+# --- Security & Authentication ---
+requests==2.32.3 # For synchronous HTTP requests (e.g., Google Token Exchange)
+PyJWT==2.10.1
+python-jose
+passlib==1.7.4 # For hashing passwords
+bcrypt==4.1.3 # Backend for passlib's password hashing
+
+# -----------------------------------------------------------
+# >>> CRITICAL ADDITIONS FOR GOOGLE SHEETS API INTEGRATION <<<
+# -----------------------------------------------------------
+google-api-python-client==2.119.0 # Core library for Google Sheets/Drive APIs
+google-auth-oauthlib==1.2.0       # Handles OAuth2 flow and token refreshing 
+# -----------------------------------------------------------
+
+# --- Data Schemas & Utilities ---
+pydantic[email]==2.7.1 # Updated to a recent version, includes email validation
+typing-extensions==4.15.0
+tqdm==4.67.1
