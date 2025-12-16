@@ -5,14 +5,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List
 import uuid
 from urllib.parse import urlencode 
-import requests 
-
-# --- CRITICAL GOOGLE API IMPORTS (Required for Sheets interaction) ---
-from google.oauth2.credentials import Credentials 
-from google.auth.transport.requests import Request as GoogleRequest
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-# --------------------------------------------------------------------
 
 # FastAPI and dependencies
 from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
@@ -32,7 +24,7 @@ from db import (
     get_audit_logs_db, get_tokens_metadata_db, 
     save_google_token, get_google_token, 
     save_state_to_db, get_user_id_from_state_db, delete_state_from_db,
-    verify_password_helper 
+    verify_password_helper # <--- CRITICAL: Importing the reliable password check
 )
 
 # --- Environment and Configuration ---
@@ -41,7 +33,6 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 API_TITLE = "AI Data Analyst Backend"
 
-# Ensure these environment variables are set
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI", "http://localhost:10000/auth/google/callback")
@@ -101,9 +92,11 @@ DBSession = Annotated[Session, Depends(get_db)]
 
 @app.on_event("startup")
 def on_startup():
-    """CRITICAL: Create database tables if they do not exist (data is preserved)."""
+    """CRITICAL: Create database tables if they do not exist."""
     print("Attempting to create database tables...")
     try:
+        # 🟢 FINAL CLEANUP COMPLETE: The Base.metadata.drop_all(bind=engine) is REMOVED.
+        # Tables will now be created if they don't exist, and existing data will be preserved.
         Base.metadata.create_all(bind=engine) 
         print("Database initialization successful. Existing data preserved.")
     except Exception as e:
@@ -131,8 +124,15 @@ def authenticate_user(db: Session, email: str, password: str):
     """Checks credentials and returns the User object or raises an error."""
     user = get_user_by_email(db, email)
     
+    # 🚨 CRITICAL FIX & DIAGNOSTICS START 🚨
     if user:
+        # Perform the verification check using the reliable helper function
         is_verified = verify_password_helper(password, user.hashed_password)
+        
+        # Keep prints for final check
+        print(f"DIAGNOSTIC: Login for {email}. Raw Password: '{password}'")
+        print(f"DIAGNOSTIC: DB HASH: '{user.hashed_password}'")
+        print(f"DIAGNOSTIC: Password Verified: {is_verified}")
         
         if not is_verified:
              raise HTTPException(
@@ -140,11 +140,13 @@ def authenticate_user(db: Session, email: str, password: str):
                 detail="Incorrect email or password"
             )
     else:
-        # User not found
+        # User not found (which was the issue in the last attempt)
+        print(f"DIAGNOSTIC: User not found for email: {email}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Incorrect email or password"
         )
+    # 🚨 CRITICAL FIX & DIAGNOSTICS END 🚨
         
     return user
 
@@ -209,9 +211,14 @@ def me(user: AuthUser):
 
 # -------------------- GOOGLE OAUTH --------------------
 
+# --- CORRECTED get_google_auth_url IMPLEMENTATION ---
 def get_google_auth_url(state: str):
-    """Constructs the correct Google OAuth 2.0 authorization URL."""
+    """
+    Constructs the correct Google OAuth 2.0 authorization URL.
+    """
+    
     AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+    
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": GOOGLE_REDIRECT_URI,
@@ -221,149 +228,25 @@ def get_google_auth_url(state: str):
         "prompt": "consent",
         "state": state 
     }
+    
+    # Safely encode parameters
     query_string = urlencode(params)
+
     return f"{AUTH_BASE_URL}?{query_string}"
     
-# --- Real Token Exchange (using `requests`) ---
+# Mock functions for Google Sheets logic
 def exchange_code_for_token(code: str):
-    """Exchanges the authorization code received from Google for Access and Refresh tokens."""
-    
-    TOKEN_URL = "https://oauth2.googleapis.com/token"
-    
-    token_request_data = {
-        'code': code,
-        'client_id': GOOGLE_CLIENT_ID,
-        'client_secret': GOOGLE_CLIENT_SECRET,
-        'redirect_uri': GOOGLE_REDIRECT_URI,
-        'grant_type': 'authorization_code'
-    }
+    # This should call the Google token endpoint
+    # NOTE: You MUST implement the secure HTTP request to Google's token endpoint here.
+    return {"access_token": f"mock_token_{uuid.uuid4()}", "refresh_token": None}
 
-    try:
-        response = requests.post(TOKEN_URL, data=token_request_data)
-        response.raise_for_status() 
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        print(f"Google Token Exchange HTTP Error ({e.response.status_code}): {e.response.text}")
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Failed to exchange Google code: {e.response.json().get('error_description', e.response.json().get('error'))}"
-        )
-    except requests.exceptions.RequestException as e:
-        print(f"Google Token Exchange Network Error: {e}")
-        raise HTTPException(status_code=500, detail="Network error contacting Google for token exchange.")
+def fetch_user_sheets(token: dict):
+    # This should call the Google Sheets API to list sheets
+    return {"sheets": [{"id": "sheet1", "name": "Sales Data 2025"}, {"id": "sheet2", "name": "Marketing Spend"}]}
 
-
-# -------------------- 🟢 REAL GOOGLE SHEETS API INTEGRATION 🟢 --------------------
-
-def get_refreshed_credentials(db: Session, token_metadata: Token) -> Optional[Credentials]:
-    """
-    Creates Google Credentials object, handles token refreshing if necessary,
-    and updates the database with the new token data.
-    """
-    if not token_metadata:
-        return None
-
-    creds = Credentials(
-        token=token_metadata.access_token,
-        refresh_token=token_metadata.refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
-        scopes=GOOGLE_SCOPES.split()
-    )
-
-    if creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(GoogleRequest())
-            # Save the new token data back to the database
-            token_metadata.access_token = creds.token
-            token_metadata.expires_at = datetime.now(timezone.utc) + timedelta(seconds=creds.expires_in)
-            db.add(token_metadata)
-            db.commit()
-            print("Token refreshed successfully and saved to DB.")
-        except Exception as e:
-            print(f"Error refreshing token: {e}")
-            # If refresh fails, the token is effectively dead
-            return None
-            
-    # If the token is expired and no refresh token exists, it's invalid
-    if creds.expired and not creds.refresh_token:
-        return None
-        
-    return creds
-
-
-def fetch_user_sheets_api(db: Session, user_id: int):
-    """Fetches list of user's Google Sheets (Spreadsheets)."""
-    token_metadata = get_google_token(db, user_id)
-    creds = get_refreshed_credentials(db, token_metadata)
-    
-    if not creds:
-        raise HTTPException(status_code=403, detail="Google token expired or invalid. Please reconnect.")
-
-    try:
-        # Use the Drive API to list spreadsheets, as Sheets API doesn't have a list method
-        drive_service = build('drive', 'v3', credentials=creds)
-        # Query for files that are Google Sheets (mimeType)
-        results = drive_service.files().list(
-            q="mimeType='application/vnd.google-apps.spreadsheet'", 
-            pageSize=30, 
-            fields="nextPageToken, files(id, name)"
-        ).execute()
-        
-        files = results.get('files', [])
-        
-        return [{"id": file['id'], "name": file['name']} for file in files]
-        
-    except HttpError as err:
-        print(f"Drive API Error: {err}")
-        raise HTTPException(status_code=500, detail=f"Google Sheets API error: {err.content.decode()}")
-    except Exception as e:
-        print(f"Internal API Error: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred while listing sheets.")
-
-
-def fetch_sheet_data_api(db: Session, user_id: int, spreadsheet_id: str, range_name: str = 'A1:ZZ'):
-    """Fetches all cell data from a specified range in a Google Sheet."""
-    token_metadata = get_google_token(db, user_id)
-    creds = get_refreshed_credentials(db, token_metadata)
-    
-    if not creds:
-        raise HTTPException(status_code=403, detail="Google token expired or invalid. Please reconnect.")
-
-    try:
-        service = build('sheets', 'v4', credentials=creds)
-        
-        # Call the Sheets API
-        result = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, 
-            range=range_name
-        ).execute()
-        
-        values = result.get('values', [])
-        
-        if not values:
-            return {"data": {"headers": [], "rows": []}}
-
-        # Assume the first row is headers
-        headers = values[0]
-        rows = values[1:]
-        
-        # Ensure all rows have the same number of columns as the header
-        num_headers = len(headers)
-        rows = [row + [''] * (num_headers - len(row)) for row in rows]
-        
-        return {"data": {"headers": headers, "rows": rows}}
-        
-    except HttpError as err:
-        print(f"Sheets API Error: {err}")
-        raise HTTPException(status_code=500, detail=f"Google Sheets API error: {err.content.decode()}")
-    except Exception as e:
-        print(f"Internal API Error: {e}")
-        raise HTTPException(status_code=500, detail="An unexpected error occurred while fetching sheet data.")
-        
-# -------------------- 🟢 END REAL GOOGLE SHEETS API INTEGRATION 🟢 --------------------
-
+def fetch_sheet_data(token: dict, sheet_id: str):
+    # This should call the Google Sheets API to fetch sheet data
+    return {"data": {"headers": ["A", "B"], "rows": [["1", "2"], ["3", "4"]]}}
 
 # --- 1. Initiate OAuth (Authenticated) ---
 @app.get("/auth/google_sheets", tags=["Integrations"])
@@ -382,6 +265,7 @@ def google_oauth_start(
     save_state_to_db(db, user_id=user["id"], state_uuid=state_uuid, return_path=return_path)
     db.commit()
     
+    # The Google auth URL only gets the unique UUID state
     auth_url = get_google_auth_url(state=state_uuid)
     return {"auth_url": auth_url}
 
@@ -396,12 +280,12 @@ def google_oauth_callback(
 ):
     """
     Handles the callback from Google. This route MUST BE UN-AUTHENTICATED.
+    It retrieves the user ID from the 'state' parameter stored in the DB.
     """
     
     user_id = None
     final_return_path = "/dashboard/integrations"
     success = False
-    error_detail = "" 
 
     try:
         # 1. Retrieve user_id and return_path using the state UUID from the DB
@@ -413,7 +297,7 @@ def google_oauth_callback(
         user_id = state_data["user_id"]
         final_return_path = state_data["return_path"]
 
-        # 2. Exchange code for token
+        # 2. Exchange code for token (Needs actual implementation)
         token_data = exchange_code_for_token(code)
         
         # 3. Save the token data to the DB associated with the user_id
@@ -427,18 +311,17 @@ def google_oauth_callback(
         success = True
 
     except HTTPException as e:
+        # Handle exceptions like invalid state or token exchange failure
         print(f"OAuth Error: {e.detail}")
-        error_detail = e.detail
         success = False
     except Exception as e:
+        # Catch all other errors (e.g., network, DB)
         print(f"Critical OAuth Error: {e}")
-        error_detail = "Internal server error during connection process."
         success = False
     finally:
+        # Redirect the user back to the frontend with the status
         status_param = "true" if success else "false"
-        error_param = f"&error_detail={error_detail}" if not success and error_detail else ""
-        
-        redirect_url = f"{final_return_path}?connected={status_param}&type=google_sheets{error_param}"
+        redirect_url = f"{final_return_path}?connected={status_param}&type=google_sheets"
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
 
@@ -465,28 +348,32 @@ def get_connected_apps_status(user: AuthUser, db: DBSession):
         
     return response
 
-# --- Replaced mock with Real API Function ---
 @app.get("/sheets-list", tags=["Integrations"])
 def sheets_list(user: AuthUser, db: DBSession):
     """Fetches a list of available Google Sheets for the authenticated user."""
-    # Calls the new API function
-    sheets = fetch_user_sheets_api(db, user["id"])
-    return {"sheets": sheets}
+    token = get_google_token(db, user["id"])
+    if not token:
+        raise HTTPException(status_code=403, detail="Google not connected. Please authorize.")
+
+    # Using the mock fetch function (replace with real Sheets API call)
+    sheets = fetch_user_sheets(token)
+    return sheets
 
 
-# --- Replaced mock with Real API Function ---
 @app.get("/sheets/{sheet_id}", tags=["Integrations"])
 def get_sheet(sheet_id: str, user: AuthUser, db: DBSession):
     """Fetches data from a specific Google Sheet."""
-    # Calls the new API function
-    data = fetch_sheet_data_api(db, user["id"], spreadsheet_id=sheet_id)
-    # Returns in the format: {"data": {"headers": [...], "rows": [...]}}
+    token = get_google_token(db, user["id"])
+    if not token:
+        raise HTTPException(status_code=403, detail="Google not connected. Please authorize.")
+
+    # Using the mock fetch function (replace with real Sheets API call)
+    data = fetch_sheet_data(token, sheet_id)
     return data
 
 # -------------------- ANALYSIS SESSIONS --------------------
 
-# (The Analysis Session routes remain unchanged from the previous version)
-
+# Existing endpoint for explicit save
 @app.post("/analysis/save", tags=["Analysis"])
 def save_analysis(payload: AnalysisSaveRequest, user_id: AuthUserID, db: DBSession, request: Request):
     """Explicitly saves the analysis session with a user-provided name."""
@@ -507,21 +394,25 @@ def save_analysis(payload: AnalysisSaveRequest, user_id: AuthUserID, db: DBSessi
     return {"session_id": dashboard.id}
 
 
+# NEW: Endpoint for implicit autosave (used when navigating away or clearing)
 @app.post("/analysis/autosave", tags=["Analysis"])
 def autosave_analysis(payload: AnalysisAutosaveRequest, user_id: AuthUserID, db: DBSession):
     """Saves the current in-progress analysis to the user's implicit session (the latest one)."""
     
+    # 1. Look for the most recent session (which is the current working session)
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
 
     layout_data_json = json.dumps({"config": payload.config, "results": payload.results, "source": payload.source})
 
     if dashboard:
+        # Update existing session
         if dashboard.name == "Implicit Working Session" or not dashboard.name:
             dashboard.name = payload.source or "Implicit Working Session"
         
         dashboard.layout_data = layout_data_json
         dashboard.last_accessed = datetime.now(timezone.utc)
     else:
+        # Create a new session record if none exists
         dashboard = Dashboard(
             user_id=user_id,
             name=payload.source or "Implicit Working Session",
@@ -534,15 +425,19 @@ def autosave_analysis(payload: AnalysisAutosaveRequest, user_id: AuthUserID, db:
     return {"session_id": dashboard.id}
 
 
+# NEW: Endpoint for autoload (used when navigating to the page)
 @app.get("/analysis/current", tags=["Analysis"])
 def get_current_analysis(user_id: AuthUserID, db: DBSession):
     """Retrieves the most recently accessed dashboard/session for the user."""
 
+    # Fetch the most recent dashboard record (current working session)
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
 
     if not dashboard or not dashboard.layout_data:
+        # Return 404 if no previous session exists
         raise HTTPException(status_code=404, detail="No current analysis session found.")
 
+    # Deserialize the data stored in the database
     try:
         layout_data = json.loads(dashboard.layout_data) if dashboard.layout_data else {} 
     except json.JSONDecodeError:

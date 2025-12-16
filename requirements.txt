@@ -1,7 +1,11 @@
 # --- FastAPI Framework & ASGI Server ---
 uvicorn==0.35.0
 fastapi==0.110.1
-httpx==0.28.1
+# Note: httpx is useful for asynchronous clients, but since we used 'requests' 
+# for the Google token exchange, we'll keep 'requests' and remove 'httpx' if it's 
+# not being used elsewhere asynchronously. If you need it for other async tasks, keep it.
+# We will keep 'httpx' here just in case, but you used 'requests' for the Google part.
+httpx==0.28.1 
 
 # --- Database Drivers & ORM ---
 sqlalchemy==2.0.44
@@ -11,20 +15,13 @@ asyncpg
 python-dotenv==1.1.1
 
 # --- Security & Authentication ---
-requests==2.32.3 # For synchronous HTTP requests (e.g., Google Token Exchange)
+requests==2.32.3           # For synchronous HTTP requests (e.g., Google Token Exchange)
 PyJWT==2.10.1
-python-jose
-passlib==1.7.4 # For hashing passwords
-bcrypt==4.1.3 # Backend for passlib's password hashing
-
-# -----------------------------------------------------------
-# >>> CRITICAL ADDITIONS FOR GOOGLE SHEETS API INTEGRATION <<<
-# -----------------------------------------------------------
-google-api-python-client==2.119.0 # Core library for Google Sheets/Drive APIs
-google-auth-oauthlib==1.2.0       # Handles OAuth2 flow and token refreshing 
-# -----------------------------------------------------------
+python-jose                # Note: PyJWT is often enough, but keeping python-jose for completeness
+passlib==1.7.4             # For hashing passwords
+bcrypt==4.1.3              # Backend for passlib's password hashing
 
 # --- Data Schemas & Utilities ---
-pydantic[email]==2.7.1 # Updated to a recent version, includes email validation
-typing-extensions==4.15.0
-tqdm==4.67.1
+pydantic[email]==2.7.1     # Updated to a recent version, includes email validation
+typing-extensions==4.15.0  # For type hints (often included with Python, but good to specify)
+tqdm==4.67.1               # Progress bar utility
