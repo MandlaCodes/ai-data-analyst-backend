@@ -1,17 +1,34 @@
-fastapi==0.116.1
-uvicorn==0.35.0
+# --- FASTAPI / UVICORN (Pinned to V1-compatible versions) ---
+uvicorn==0.20.0
+fastapi==0.95.0 
 httpx==0.28.1
-python-dotenv==1.1.1
+
+# --- DATABASE DRIVERS (Pinned stable versions) ---
 sqlalchemy==2.0.44
 databases==0.9.0
-gpt4all==2.7.0
+psycopg2-binary==2.9.9   
+asyncpg==0.27.0          
+python-dotenv==1.1.1
+
+# --- SECURITY / AUTH ---
 requests==2.32.3
 PyJWT==2.10.1
 python-jose
-tqdm==4.67.1
-typing-extensions==4.15.0
 passlib==1.7.4
 bcrypt==4.1.3
-psycopg2-binary
-asyncpg
-pydantic[email]
+
+# -----------------------------------------------------------
+# >>> CRITICAL ADDITIONS FOR GOOGLE SHEETS API INTEGRATION <<<
+# -----------------------------------------------------------
+google-api-python-client==2.119.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+# -----------------------------------------------------------
+
+# --- DATA SCHEMAS / UTILITIES (Pinned to V1 to ensure build success) ---
+pydantic[email]==1.10.17    
+typing-extensions==4.15.0
+tqdm==4.67.1
+
+# --- OTHER LIBRARIES ---
+gpt4all==2.3.0
