@@ -2,9 +2,9 @@ import os
 import sys
 import json
 import httpx 
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List
-import uuid
 from urllib.parse import urlencode 
 
 # FastAPI and dependencies
@@ -37,6 +37,8 @@ API_TITLE = "AI Data Analyst Backend"
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI")
+
+# CRITICAL: Added drive.readonly so we can list the files in the picker
 GOOGLE_SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly profile email"
 
 # --- Application Initialization ---
@@ -101,7 +103,6 @@ def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]):
     except (JWTError, ValueError):
         raise credentials_exception
 
-# NEW HELPER: Used for browser redirects where headers aren't possible
 def get_user_from_query_token(token: str, db: Session):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -159,14 +160,13 @@ def login(payload: UserLogin, db: DBSession, request: Request):
 def me(user: AuthUser):
     return { "user_id": user["id"], "email": user["email"] }
 
-# -------------------- GOOGLE OAUTH --------------------
-
+# -------------------- GOOGLE OAUTH FLOW --------------------
 
 def get_google_auth_url(state: str):
     AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
     params = {
         "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": GOOGLE_REDIRECT_URI, # Must be .../auth/callback
+        "redirect_uri": GOOGLE_REDIRECT_URI,
         "response_type": "code",
         "scope": GOOGLE_SCOPES,
         "access_type": "offline",
@@ -179,29 +179,20 @@ def get_google_auth_url(state: str):
 def google_oauth_start(token: str, db: Session = Depends(get_db), return_path: str = "/dashboard/integrations"):
     user = get_user_from_query_token(token, db)
     state_uuid = str(uuid.uuid4())
-    
-    # Save state to DB so we know which tenant this is when they return
     save_state_to_db(db, user_id=user["id"], state_uuid=state_uuid, return_path=return_path)
     db.commit()
-    
     auth_url = get_google_auth_url(state=state_uuid)
     return RedirectResponse(url=auth_url)
 
-# MATCHED TO YOUR REDIRECT_URI: /auth/callback
 @app.get("/auth/callback", tags=["Integrations"], include_in_schema=False)
 async def google_oauth_callback(code: str, state: str, db: DBSession, request: Request):
-    print(f"DEBUG: Callback received. State: {state}")
-    
-    # 1. Find the tenant in the DB using the state
     state_data = get_user_id_from_state_db(db, state_uuid=state)
     if not state_data:
-        print("DEBUG: State not found in database.")
         return RedirectResponse(url="https://aianalyst-gamma.vercel.app/dashboard/integrations?connected=false&error=session_expired")
         
     user_id = state_data["user_id"]
     final_return_path = state_data.get("return_path", "/dashboard/integrations")
 
-    # 2. Exchange code for tokens
     async with httpx.AsyncClient() as client:
         resp = await client.post("https://oauth2.googleapis.com/token", data={
             "code": code,
@@ -212,19 +203,56 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
         })
         token_data = resp.json()
 
-    # 3. Save Google Token to the Tenant's record in the DB
     if "access_token" in token_data:
         save_google_token(db, user_id, token_data)
         delete_state_from_db(db, state_uuid=state)
         create_audit_log(db, user_id=user_id, event_type="GOOGLE_OAUTH_CONNECTED", ip_address=request.client.host if request.client else "unknown")
         db.commit()
-        print(f"DEBUG: Successfully connected Google Sheets for User {user_id}")
-        
-        # REDIRECT BACK TO VERCEL
         return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=true&type=google_sheets")
     
-    print(f"DEBUG: Token exchange failed. Response: {token_data}")
     return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=false&error=token_exchange_failed")
+
+# -------------------- GOOGLE API DATA FETCHING --------------------
+
+@app.get("/google/sheets", tags=["Integrations"])
+async def list_google_sheets(user_id: AuthUserID, db: DBSession):
+    """Fetches the list of spreadsheets for the file picker."""
+    token_obj = get_google_token(db, user_id)
+    if not token_obj:
+        raise HTTPException(status_code=401, detail="Google account not connected")
+
+    async with httpx.AsyncClient() as client:
+        headers = {"Authorization": f"Bearer {token_obj.access_token}"}
+        params = {
+            "q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+            "fields": "files(id, name)",
+            "pageSize": 50
+        }
+        resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+        
+        if resp.status_code != 200:
+            return {"files": [], "error": "Unable to fetch files from Google"}
+
+        return resp.json()
+
+@app.get("/google/sheets/{spreadsheet_id}", tags=["Integrations"])
+async def get_google_sheet_data(spreadsheet_id: str, user_id: AuthUserID, db: DBSession):
+    """Fetches cell data from a specific spreadsheet."""
+    token_obj = get_google_token(db, user_id)
+    if not token_obj:
+        raise HTTPException(status_code=401, detail="Google account not connected")
+
+    async with httpx.AsyncClient() as client:
+        headers = {"Authorization": f"Bearer {token_obj.access_token}"}
+        # Defaulting to first sheet range A1:Z1000
+        url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/A1:Z1000"
+        resp = await client.get(url, headers=headers)
+        
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail="Could not retrieve spreadsheet data")
+            
+        return resp.json()
+
 # -------------------- CONNECTED APPS --------------------
 
 @app.get("/connected-apps", tags=["Integrations"])
@@ -245,11 +273,6 @@ def disconnect_sheets(user: AuthUser, db: DBSession):
 
 class AnalysisSaveRequest(BaseModel):
     name: str
-    source: str
-    config: dict
-    results: dict
-
-class AnalysisAutosaveRequest(BaseModel):
     source: str
     config: dict
     results: dict
