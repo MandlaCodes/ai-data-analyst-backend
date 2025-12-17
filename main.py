@@ -38,7 +38,6 @@ GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI")
 
-# CRITICAL: Added drive.readonly so we can list the files in the picker
 GOOGLE_SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly profile email"
 
 # --- Application Initialization ---
@@ -169,8 +168,8 @@ def get_google_auth_url(state: str):
         "redirect_uri": GOOGLE_REDIRECT_URI,
         "response_type": "code",
         "scope": GOOGLE_SCOPES,
-        "access_type": "offline",
-        "prompt": "consent",
+        "access_type": "offline", # Crucial for refresh tokens
+        "prompt": "consent",      # Ensures we always get a refresh token
         "state": state 
     }
     return f"{AUTH_BASE_URL}?{urlencode(params)}"
@@ -212,11 +211,10 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
     
     return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=false&error=token_exchange_failed")
 
-# -------------------- GOOGLE API DATA FETCHING --------------------
+# -------------------- GOOGLE API DATA FETCHING (WITH AUTO-REFRESH) --------------------
 
 @app.get("/google/sheets", tags=["Integrations"])
 async def list_google_sheets(user_id: AuthUserID, db: DBSession):
-    """Fetches the list of spreadsheets for the file picker."""
     token_obj = get_google_token(db, user_id)
     if not token_obj:
         raise HTTPException(status_code=401, detail="Google account not connected")
@@ -230,6 +228,22 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
         }
         resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
         
+        # --- IF EXPIRED, REFRESH ---
+        if resp.status_code == 401 and token_obj.refresh_token:
+            refresh_resp = await client.post("https://oauth2.googleapis.com/token", data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": token_obj.refresh_token,
+                "grant_type": "refresh_token",
+            })
+            if refresh_resp.status_code == 200:
+                new_tokens = refresh_resp.json()
+                token_obj.access_token = new_tokens["access_token"]
+                db.commit()
+                # Retry request
+                headers["Authorization"] = f"Bearer {token_obj.access_token}"
+                resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+
         if resp.status_code != 200:
             return {"files": [], "error": "Unable to fetch files from Google"}
 
@@ -237,16 +251,29 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
 
 @app.get("/google/sheets/{spreadsheet_id}", tags=["Integrations"])
 async def get_google_sheet_data(spreadsheet_id: str, user_id: AuthUserID, db: DBSession):
-    """Fetches cell data from a specific spreadsheet."""
     token_obj = get_google_token(db, user_id)
     if not token_obj:
         raise HTTPException(status_code=401, detail="Google account not connected")
 
     async with httpx.AsyncClient() as client:
         headers = {"Authorization": f"Bearer {token_obj.access_token}"}
-        # Defaulting to first sheet range A1:Z1000
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/A1:Z1000"
         resp = await client.get(url, headers=headers)
+        
+        # --- IF EXPIRED, REFRESH ---
+        if resp.status_code == 401 and token_obj.refresh_token:
+            refresh_resp = await client.post("https://oauth2.googleapis.com/token", data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": token_obj.refresh_token,
+                "grant_type": "refresh_token",
+            })
+            if refresh_resp.status_code == 200:
+                new_tokens = refresh_resp.json()
+                token_obj.access_token = new_tokens["access_token"]
+                db.commit()
+                headers["Authorization"] = f"Bearer {token_obj.access_token}"
+                resp = await client.get(url, headers=headers)
         
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail="Could not retrieve spreadsheet data")
