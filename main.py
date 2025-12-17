@@ -161,11 +161,12 @@ def me(user: AuthUser):
 
 # -------------------- GOOGLE OAUTH --------------------
 
+
 def get_google_auth_url(state: str):
     AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
     params = {
         "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "redirect_uri": GOOGLE_REDIRECT_URI, # Must be .../auth/callback
         "response_type": "code",
         "scope": GOOGLE_SCOPES,
         "access_type": "offline",
@@ -174,32 +175,33 @@ def get_google_auth_url(state: str):
     }
     return f"{AUTH_BASE_URL}?{urlencode(params)}"
 
-# FIXED: Now accepts token via Query to allow browser redirect from Integrations page
 @app.get("/auth/google_sheets", tags=["Integrations"])
-def google_oauth_start(
-    token: str, 
-    db: Session = Depends(get_db), 
-    return_path: str = "/dashboard/integrations"
-):
-    # Manually validate the tenant/user from the token in the URL
+def google_oauth_start(token: str, db: Session = Depends(get_db), return_path: str = "/dashboard/integrations"):
     user = get_user_from_query_token(token, db)
-    
     state_uuid = str(uuid.uuid4())
+    
+    # Save state to DB so we know which tenant this is when they return
     save_state_to_db(db, user_id=user["id"], state_uuid=state_uuid, return_path=return_path)
     db.commit()
     
     auth_url = get_google_auth_url(state=state_uuid)
     return RedirectResponse(url=auth_url)
 
-@app.get("/auth/google/callback", tags=["Integrations"], include_in_schema=False)
+# MATCHED TO YOUR REDIRECT_URI: /auth/callback
+@app.get("/auth/callback", tags=["Integrations"], include_in_schema=False)
 async def google_oauth_callback(code: str, state: str, db: DBSession, request: Request):
+    print(f"DEBUG: Callback received. State: {state}")
+    
+    # 1. Find the tenant in the DB using the state
     state_data = get_user_id_from_state_db(db, state_uuid=state)
     if not state_data:
-        raise HTTPException(status_code=400, detail="Invalid or expired state parameter.")
+        print("DEBUG: State not found in database.")
+        return RedirectResponse(url="https://aianalyst-gamma.vercel.app/dashboard/integrations?connected=false&error=session_expired")
         
     user_id = state_data["user_id"]
-    final_return_path = state_data["return_path"]
+    final_return_path = state_data.get("return_path", "/dashboard/integrations")
 
+    # 2. Exchange code for tokens
     async with httpx.AsyncClient() as client:
         resp = await client.post("https://oauth2.googleapis.com/token", data={
             "code": code,
@@ -210,15 +212,19 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
         })
         token_data = resp.json()
 
+    # 3. Save Google Token to the Tenant's record in the DB
     if "access_token" in token_data:
         save_google_token(db, user_id, token_data)
         delete_state_from_db(db, state_uuid=state)
         create_audit_log(db, user_id=user_id, event_type="GOOGLE_OAUTH_CONNECTED", ip_address=request.client.host if request.client else "unknown")
         db.commit()
+        print(f"DEBUG: Successfully connected Google Sheets for User {user_id}")
+        
+        # REDIRECT BACK TO VERCEL
         return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=true&type=google_sheets")
     
+    print(f"DEBUG: Token exchange failed. Response: {token_data}")
     return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=false&error=token_exchange_failed")
-
 # -------------------- CONNECTED APPS --------------------
 
 @app.get("/connected-apps", tags=["Integrations"])
