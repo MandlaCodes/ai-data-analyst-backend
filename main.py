@@ -16,6 +16,9 @@ from pydantic import BaseModel, EmailStr
 from jose import jwt, JWTError
 from fastapi.security import OAuth2PasswordBearer
 
+# Official OpenAI SDK
+from openai import AsyncOpenAI
+
 # Import all models, engine, and helper functions from db.py
 from db import (
     User, AuditLog, Dashboard, Settings, Token, StateToken,
@@ -30,6 +33,7 @@ from db import (
 
 # --- Environment and Configuration ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "THIS_IS_A_VERY_INSECURE_DEFAULT_SECRET_CHANGE_ME_IN_PROD") 
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 API_TITLE = "AI Data Analyst Backend"
@@ -37,8 +41,10 @@ API_TITLE = "AI Data Analyst Backend"
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI")
-
 GOOGLE_SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly profile email"
+
+# Initialize Async OpenAI Client
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # --- Application Initialization ---
 app = FastAPI(title=API_TITLE)
@@ -76,6 +82,38 @@ def on_startup():
         print("Database initialization successful.")
     except Exception as e:
         print(f"Database initialization FAILED: {e}")
+
+# -------------------- AI ANALYST SCHEMAS & UTILITIES --------------------
+
+class AIAnalysisRequest(BaseModel):
+    context: dict
+    mode: str = "STRATEGIC_REPLACEMENT"
+
+class AIChatRequest(BaseModel):
+    message: str
+    context: dict
+
+async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: bool = True):
+    """Utility to call GPT-4o-mini efficiently using the official SDK."""
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OpenAI API Key not configured")
+
+    try:
+        response_format = {"type": "json_object"} if json_mode else None
+        
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            response_format=response_format
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"OpenAI API Call Failed: {e}")
+        raise HTTPException(status_code=500, detail="Intelligence Layer Error")
 
 # -------------------- AUTHENTICATION HELPERS --------------------
 
@@ -159,6 +197,35 @@ def login(payload: UserLogin, db: DBSession, request: Request):
 def me(user: AuthUser):
     return { "user_id": user["id"], "email": user["email"] }
 
+# -------------------- AI ANALYST ROUTES --------------------
+
+@app.post("/ai/analyze", tags=["AI Analyst"])
+async def analyze_data(payload: AIAnalysisRequest, user_id: AuthUserID, db: DBSession):
+    """The 'Strategic Replacement' endpoint using GPT-4o-mini."""
+    system_prompt = (
+        "You are a Senior Strategic Data Analyst. Respond ONLY in valid JSON. "
+        "Analyze the provided context and return exactly these keys: 'risk', 'opportunity', 'action'. "
+        "Keep insights sharp, professional, and executive-level. Limit each value to 2 sentences."
+    )
+    
+    user_prompt = f"Data Summary: {json.dumps(payload.context)}. Provide strategic takeaways."
+    
+    raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
+    return json.loads(raw_ai_response)
+
+@app.post("/ai/chat", tags=["AI Analyst"])
+async def chat_with_data(payload: AIChatRequest, user_id: AuthUserID, db: DBSession):
+    """Direct chat interaction with data context."""
+    system_prompt = (
+        "You are an AI Data Analyst named MetriaAI. You have access to the user's current dataset summary. "
+        "Answer questions based on the data. Be concise, use professional terminology, and avoid conversational fluff."
+    )
+    
+    user_prompt = f"Dataset Context: {json.dumps(payload.context)}\n\nUser Question: {payload.message}"
+    
+    response_text = await call_openai_analyst(user_prompt, system_prompt, json_mode=False)
+    return {"reply": response_text}
+
 # -------------------- GOOGLE OAUTH FLOW --------------------
 
 def get_google_auth_url(state: str):
@@ -168,8 +235,8 @@ def get_google_auth_url(state: str):
         "redirect_uri": GOOGLE_REDIRECT_URI,
         "response_type": "code",
         "scope": GOOGLE_SCOPES,
-        "access_type": "offline", # Crucial for refresh tokens
-        "prompt": "consent",      # Ensures we always get a refresh token
+        "access_type": "offline", 
+        "prompt": "consent",      
         "state": state 
     }
     return f"{AUTH_BASE_URL}?{urlencode(params)}"
@@ -211,7 +278,7 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
     
     return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=false&error=token_exchange_failed")
 
-# -------------------- GOOGLE API DATA FETCHING (WITH AUTO-REFRESH) --------------------
+# -------------------- GOOGLE API DATA FETCHING --------------------
 
 @app.get("/google/sheets", tags=["Integrations"])
 async def list_google_sheets(user_id: AuthUserID, db: DBSession):
@@ -228,7 +295,6 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
         }
         resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
         
-        # --- IF EXPIRED, REFRESH ---
         if resp.status_code == 401 and token_obj.refresh_token:
             refresh_resp = await client.post("https://oauth2.googleapis.com/token", data={
                 "client_id": GOOGLE_CLIENT_ID,
@@ -240,7 +306,6 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
                 new_tokens = refresh_resp.json()
                 token_obj.access_token = new_tokens["access_token"]
                 db.commit()
-                # Retry request
                 headers["Authorization"] = f"Bearer {token_obj.access_token}"
                 resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
 
@@ -260,7 +325,6 @@ async def get_google_sheet_data(spreadsheet_id: str, user_id: AuthUserID, db: DB
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/A1:Z1000"
         resp = await client.get(url, headers=headers)
         
-        # --- IF EXPIRED, REFRESH ---
         if resp.status_code == 401 and token_obj.refresh_token:
             refresh_resp = await client.post("https://oauth2.googleapis.com/token", data={
                 "client_id": GOOGLE_CLIENT_ID,
