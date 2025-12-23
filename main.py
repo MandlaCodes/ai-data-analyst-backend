@@ -113,7 +113,10 @@ async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: b
         return response.choices[0].message.content
     except Exception as e:
         print(f"OpenAI API Call Failed: {e}")
-        raise HTTPException(status_code=500, detail="Intelligence Layer Error")
+        # Return a fallback if API fails
+        if json_mode:
+            return json.dumps({"risk": "AI processing error", "opportunity": "Check connection", "action": "Retry request"})
+        return "I encountered an error processing that request."
 
 # -------------------- AUTHENTICATION HELPERS --------------------
 
@@ -360,33 +363,70 @@ def disconnect_sheets(user: AuthUser, db: DBSession):
     db.commit()
     return {"status": "success"}
 
-# -------------------- ANALYSIS SESSIONS --------------------
+# -------------------- ANALYSIS SESSIONS (FULL STATE STORAGE) --------------------
 
-class AnalysisSaveRequest(BaseModel):
+class PageStateSaveRequest(BaseModel):
     name: str
-    source: str
-    config: dict
-    results: dict
+    # 'page_state' is a dictionary containing datasets, chat, analysis, and visualization config
+    page_state: dict 
 
 @app.post("/analysis/save", tags=["Analysis"])
-def save_analysis(payload: AnalysisSaveRequest, user_id: AuthUserID, db: DBSession, request: Request):
-    layout_data_json = json.dumps({"config": payload.config, "results": payload.results, "source": payload.source})
-    dashboard = Dashboard(user_id=user_id, name=payload.name, layout_data=layout_data_json)
+def save_analysis(payload: PageStateSaveRequest, user_id: AuthUserID, db: DBSession, request: Request):
+    """Saves the entire UI state as a snapshot in the database."""
+    # We serialize the entire UI state into the layout_data field
+    snapshot_json = json.dumps(payload.page_state)
+    
+    dashboard = Dashboard(
+        user_id=user_id, 
+        name=payload.name, 
+        layout_data=snapshot_json
+    )
     db.add(dashboard)
     db.commit()
-    create_audit_log(db, user_id=user_id, event_type="ANALYSIS_SAVED", ip_address=request.client.host if request.client else "unknown")
+    
+    create_audit_log(db, user_id=user_id, event_type="ANALYSIS_SNAPSHOT_SAVED", ip_address=request.client.host if request.client else "unknown")
     db.commit()
-    return {"session_id": dashboard.id}
+    return {"session_id": dashboard.id, "message": "Full state saved"}
 
 @app.get("/analysis/current", tags=["Analysis"])
 def get_current_analysis(user_id: AuthUserID, db: DBSession):
-    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
+    """Retrieves the most recent full state snapshot for the user."""
+    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.created_at.desc()).first()
+    
     if not dashboard or not dashboard.layout_data:
-        raise HTTPException(status_code=404, detail="No current session found.")
-    layout_data = json.loads(dashboard.layout_data)
+        raise HTTPException(status_code=404, detail="No previous analysis state found.")
+    
+    # Update last_accessed timestamp
+    dashboard.last_accessed = datetime.now(timezone.utc)
+    db.commit()
+    
     return {
-        "id": dashboard.id, "name": dashboard.name, "source": layout_data.get("source"),
-        "config": layout_data.get("config", {}), "results": layout_data.get("results", {})
+        "id": dashboard.id,
+        "name": dashboard.name,
+        "saved_at": dashboard.created_at,
+        "page_state": json.loads(dashboard.layout_data)
+    }
+
+@app.get("/analysis/history", tags=["Analysis"])
+def get_analysis_history(user_id: AuthUserID, db: DBSession):
+    """Returns a list of all saved snapshots for the history panel."""
+    sessions = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.created_at.desc()).all()
+    return [
+        {"id": s.id, "name": s.name, "created_at": s.created_at} 
+        for s in sessions
+    ]
+
+@app.get("/analysis/{analysis_id}", tags=["Analysis"])
+def get_analysis_by_id(analysis_id: int, user_id: AuthUserID, db: DBSession):
+    """Restores a specific past analysis by its ID."""
+    dashboard = db.query(Dashboard).filter(Dashboard.id == analysis_id, Dashboard.user_id == user_id).first()
+    if not dashboard:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+        
+    return {
+        "id": dashboard.id,
+        "name": dashboard.name,
+        "page_state": json.loads(dashboard.layout_data)
     }
 
 # -------------------- SYSTEM --------------------
