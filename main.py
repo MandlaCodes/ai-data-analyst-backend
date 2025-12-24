@@ -94,13 +94,11 @@ class AIChatRequest(BaseModel):
     context: dict
 
 async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: bool = True):
-    """Utility to call GPT-4o-mini efficiently using the official SDK."""
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API Key not configured")
 
     try:
         response_format = {"type": "json_object"} if json_mode else None
-        
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -113,7 +111,6 @@ async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: b
         return response.choices[0].message.content
     except Exception as e:
         print(f"OpenAI API Call Failed: {e}")
-        # Return a fallback if API fails
         if json_mode:
             return json.dumps({"risk": "AI processing error", "opportunity": "Check connection", "action": "Retry request"})
         return "I encountered an error processing that request."
@@ -204,28 +201,22 @@ def me(user: AuthUser):
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
 async def analyze_data(payload: AIAnalysisRequest, user_id: AuthUserID, db: DBSession):
-    """The 'Strategic Replacement' endpoint using GPT-4o-mini."""
     system_prompt = (
         "You are a Senior Strategic Data Analyst. Respond ONLY in valid JSON. "
         "Analyze the provided context and return exactly these keys: 'risk', 'opportunity', 'action'. "
         "Keep insights sharp, professional, and executive-level. Limit each value to 2 sentences."
     )
-    
     user_prompt = f"Data Summary: {json.dumps(payload.context)}. Provide strategic takeaways."
-    
     raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
     return json.loads(raw_ai_response)
 
 @app.post("/ai/chat", tags=["AI Analyst"])
 async def chat_with_data(payload: AIChatRequest, user_id: AuthUserID, db: DBSession):
-    """Direct chat interaction with data context."""
     system_prompt = (
         "You are an AI Data Analyst named MetriaAI. You have access to the user's current dataset summary. "
         "Answer questions based on the data. Be concise, use professional terminology, and avoid conversational fluff."
     )
-    
     user_prompt = f"Dataset Context: {json.dumps(payload.context)}\n\nUser Question: {payload.message}"
-    
     response_text = await call_openai_analyst(user_prompt, system_prompt, json_mode=False)
     return {"reply": response_text}
 
@@ -314,7 +305,6 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
 
         if resp.status_code != 200:
             return {"files": [], "error": "Unable to fetch files from Google"}
-
         return resp.json()
 
 @app.get("/google/sheets/{spreadsheet_id}", tags=["Integrations"])
@@ -344,10 +334,57 @@ async def get_google_sheet_data(spreadsheet_id: str, user_id: AuthUserID, db: DB
         
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail="Could not retrieve spreadsheet data")
-            
         return resp.json()
 
-# -------------------- CONNECTED APPS --------------------
+# -------------------- ANALYSIS SESSIONS (AUTOSAVE & PERSISTENCE) --------------------
+
+class PageStateSaveRequest(BaseModel):
+    name: str = "Latest Dashboard"
+    page_state: dict 
+
+@app.post("/analysis/save", tags=["Analysis"])
+def save_analysis(payload: PageStateSaveRequest, user_id: AuthUserID, db: DBSession):
+    """Upserts the latest UI state into the Dashboard table's layout_data column."""
+    snapshot_json = json.dumps(payload.page_state)
+    
+    # Check for existing dashboard to update (implementing 'Autosave' behavior)
+    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).first()
+    
+    if dashboard:
+        dashboard.layout_data = snapshot_json
+        dashboard.name = payload.name
+        dashboard.last_accessed = datetime.now(timezone.utc)
+    else:
+        dashboard = Dashboard(
+            user_id=user_id, 
+            name=payload.name, 
+            layout_data=snapshot_json
+        )
+        db.add(dashboard)
+    
+    db.commit()
+    return {"session_id": dashboard.id, "message": "Autosave complete"}
+
+@app.get("/analysis/current", tags=["Analysis"])
+def get_current_analysis(user_id: AuthUserID, db: DBSession):
+    """Retrieves the latest layout_data for population on login/refresh."""
+    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
+    
+    if not dashboard or not dashboard.layout_data:
+        return {"id": None, "page_state": None}
+    
+    return {
+        "id": dashboard.id,
+        "name": dashboard.name,
+        "page_state": json.loads(dashboard.layout_data)
+    }
+
+@app.get("/analysis/history", tags=["Analysis"])
+def get_analysis_history(user_id: AuthUserID, db: DBSession):
+    sessions = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.created_at.desc()).all()
+    return [{"id": s.id, "name": s.name, "created_at": s.created_at} for s in sessions]
+
+# -------------------- CONNECTED APPS & SYSTEM --------------------
 
 @app.get("/connected-apps", tags=["Integrations"])
 def get_connected_apps_status(user: AuthUser, db: DBSession):
@@ -363,78 +400,10 @@ def disconnect_sheets(user: AuthUser, db: DBSession):
     db.commit()
     return {"status": "success"}
 
-# -------------------- ANALYSIS SESSIONS (FULL STATE STORAGE) --------------------
-
-class PageStateSaveRequest(BaseModel):
-    name: str
-    # 'page_state' is a dictionary containing datasets, chat, analysis, and visualization config
-    page_state: dict 
-
-@app.post("/analysis/save", tags=["Analysis"])
-def save_analysis(payload: PageStateSaveRequest, user_id: AuthUserID, db: DBSession, request: Request):
-    """Saves the entire UI state as a snapshot in the database."""
-    # We serialize the entire UI state into the layout_data field
-    snapshot_json = json.dumps(payload.page_state)
-    
-    dashboard = Dashboard(
-        user_id=user_id, 
-        name=payload.name, 
-        layout_data=snapshot_json
-    )
-    db.add(dashboard)
-    db.commit()
-    
-    create_audit_log(db, user_id=user_id, event_type="ANALYSIS_SNAPSHOT_SAVED", ip_address=request.client.host if request.client else "unknown")
-    db.commit()
-    return {"session_id": dashboard.id, "message": "Full state saved"}
-
-@app.get("/analysis/current", tags=["Analysis"])
-def get_current_analysis(user_id: AuthUserID, db: DBSession):
-    """Retrieves the most recent full state snapshot for the user."""
-    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.created_at.desc()).first()
-    
-    if not dashboard or not dashboard.layout_data:
-        raise HTTPException(status_code=404, detail="No previous analysis state found.")
-    
-    # Update last_accessed timestamp
-    dashboard.last_accessed = datetime.now(timezone.utc)
-    db.commit()
-    
-    return {
-        "id": dashboard.id,
-        "name": dashboard.name,
-        "saved_at": dashboard.created_at,
-        "page_state": json.loads(dashboard.layout_data)
-    }
-
-@app.get("/analysis/history", tags=["Analysis"])
-def get_analysis_history(user_id: AuthUserID, db: DBSession):
-    """Returns a list of all saved snapshots for the history panel."""
-    sessions = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.created_at.desc()).all()
-    return [
-        {"id": s.id, "name": s.name, "created_at": s.created_at} 
-        for s in sessions
-    ]
-
-@app.get("/analysis/{analysis_id}", tags=["Analysis"])
-def get_analysis_by_id(analysis_id: int, user_id: AuthUserID, db: DBSession):
-    """Restores a specific past analysis by its ID."""
-    dashboard = db.query(Dashboard).filter(Dashboard.id == analysis_id, Dashboard.user_id == user_id).first()
-    if not dashboard:
-        raise HTTPException(status_code=404, detail="Snapshot not found")
-        
-    return {
-        "id": dashboard.id,
-        "name": dashboard.name,
-        "page_state": json.loads(dashboard.layout_data)
-    }
-
-# -------------------- SYSTEM --------------------
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 @app.get("/")
 def root():
-    return {"message": "API is running"}
+    return {"message": "MetriaAI API Online"}
