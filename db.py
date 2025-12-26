@@ -123,7 +123,8 @@ def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
 
 def get_user_profile_db(db: Session, user_id: int) -> Optional[User]:
-    return db.query(User).get(user_id) # Optimization: get() is faster for PK lookups
+    # Optimization: get() is faster for PK lookups
+    return db.query(User).filter(User.id == user_id).first()
 
 def create_audit_log(db: Session, user_id: int, event_type: str, ip_address: Optional[str] = None):
     db_log = AuditLog(user_id=user_id, event_type=event_type, ip_address=ip_address)
@@ -158,7 +159,11 @@ def get_user_id_from_state_db(db: Session, state_uuid: str) -> Optional[dict]:
         return None
     
     # Critical Fix: Ensure comparison is timezone aware
-    if state_record.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+    expiry = state_record.expires_at
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+        
+    if expiry < datetime.now(timezone.utc):
         db.delete(state_record)
         db.commit() 
         return None
@@ -177,7 +182,6 @@ def verify_password_helper(plain_password: str, hashed_password: str) -> bool:
     except Exception:
         return False
 
-# Retaining all other original functions
 def get_google_token(db: Session, user_id: int) -> Optional[Token]:
     return db.query(Token).filter(Token.user_id == user_id, Token.service == 'google_sheets').first()
 

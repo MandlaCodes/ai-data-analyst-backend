@@ -42,6 +42,7 @@ GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI")
 GOOGLE_SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly profile email"
+FRONTEND_URL = "https://aianalyst-gamma.vercel.app"
 
 # Initialize Async OpenAI Client
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -51,7 +52,7 @@ app = FastAPI(title=API_TITLE)
 
 # -------------------- CORS Configuration --------------------
 origins = [
-    "https://aianalyst-gamma.vercel.app", 
+    FRONTEND_URL, 
     "http://localhost:3000",
     "http://localhost:5173",
 ]
@@ -366,7 +367,8 @@ def google_oauth_start(token: str, db: Session = Depends(get_db), return_path: s
 async def google_oauth_callback(code: str, state: str, db: DBSession, request: Request):
     state_data = get_user_id_from_state_db(db, state_uuid=state)
     if not state_data:
-        return RedirectResponse(url="https://aianalyst-gamma.vercel.app/dashboard/integrations?connected=false&error=expired")
+        # If state missing, redirect to frontend integrations with error param
+        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard/integrations?connected=false&error=session_expired")
         
     user_id = state_data["user_id"]
     final_return_path = state_data.get("return_path", "/dashboard/integrations")
@@ -386,11 +388,27 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
         delete_state_from_db(db, state_uuid=state)
         create_audit_log(db, user_id=user_id, event_type="GOOGLE_CONNECTED", ip_address=request.client.host if request.client else None)
         db.commit()
-        return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=true")
+        return RedirectResponse(url=f"{FRONTEND_URL}{final_return_path}?connected=true")
     
-    return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=false")
+    return RedirectResponse(url=f"{FRONTEND_URL}{final_return_path}?connected=false&error=token_exchange_failed")
 
 # -------------------- GOOGLE API DATA FETCHING --------------------
+
+@app.get("/connected-apps", tags=["Integrations"])
+def get_connected_apps(user_id: AuthUserID, db: DBSession):
+    token = get_google_token(db, user_id)
+    if token:
+        return {
+            "google_sheets": True,
+            "google_sheets_last_sync": token.created_at
+        }
+    return {"google_sheets": False}
+
+@app.post("/disconnect/google_sheets", tags=["Integrations"])
+def disconnect_google(user_id: AuthUserID, db: DBSession):
+    db.query(Token).filter(Token.user_id == user_id, Token.service == 'google_sheets').delete()
+    db.commit()
+    return {"status": "disconnected"}
 
 @app.get("/google/sheets", tags=["Integrations"])
 async def list_google_sheets(user_id: AuthUserID, db: DBSession):
