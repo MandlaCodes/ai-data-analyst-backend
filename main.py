@@ -4,7 +4,7 @@ import json
 import httpx 
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Optional, List
+from typing import Annotated, Optional, List, Union, Any
 from urllib.parse import urlencode 
 
 # FastAPI and dependencies
@@ -32,11 +32,11 @@ from db import (
 )
 
 # --- Environment and Configuration ---
-SECRET_KEY = os.environ.get("SECRET_KEY", "THIS_IS_A_VERY_INSECURE_DEFAULT_SECRET_CHANGE_ME_IN_PROD") 
+SECRET_KEY = os.environ.get("SECRET_KEY", "METRIA_SECURE_PHRASE_2025") 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
-API_TITLE = "AI Data Analyst Backend"
+API_TITLE = "Metria Neural Engine API"
 
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
@@ -86,8 +86,8 @@ def on_startup():
 # -------------------- AI ANALYST SCHEMAS & UTILITIES --------------------
 
 class AIAnalysisRequest(BaseModel):
-    context: dict
-    mode: str = "STRATEGIC_REPLACEMENT"
+    context: Union[dict, List[dict]]
+    mode: str = "single"
 
 class AIChatRequest(BaseModel):
     message: str
@@ -112,7 +112,11 @@ async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: b
     except Exception as e:
         print(f"OpenAI API Call Failed: {e}")
         if json_mode:
-            return json.dumps({"risk": "AI processing error", "opportunity": "Check connection", "action": "Retry request"})
+            return json.dumps({
+                "risk": "Neural core timeout. Verify data density.", 
+                "opportunity": "Synthesis interrupted. Retry execution.", 
+                "action": "Refresh data stream and re-initialize analysis."
+            })
         return "I encountered an error processing that request."
 
 # -------------------- AUTHENTICATION HELPERS --------------------
@@ -157,9 +161,9 @@ def get_current_user(db: DBSession, user_id: Annotated[int, Depends(get_current_
     user = get_user_profile_db(db, user_id)
     if user is None:
         raise credentials_exception
-    return {"id": user.id, "email": user.email}
+    return user
 
-AuthUser = Annotated[dict, Depends(get_current_user)]
+AuthUser = Annotated[Any, Depends(get_current_user)]
 AuthUserID = Annotated[int, Depends(get_current_user_id)]
 
 # -------------------- AUTH ROUTES --------------------
@@ -167,6 +171,10 @@ AuthUserID = Annotated[int, Depends(get_current_user_id)]
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    organization: Optional[str] = None
+    industry: Optional[str] = None
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -176,54 +184,101 @@ class UserLogin(BaseModel):
 def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
-    user = create_user_db(db, payload.email, payload.password)
+    
+    # Save user with onboarding details
+    user = create_user_db(
+        db, 
+        email=payload.email, 
+        password=payload.password,
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+        organization=payload.organization,
+        industry=payload.industry
+    )
     db.commit() 
+    
     token = create_access_token({"sub": str(user.id)})
     create_audit_log(db, user_id=user.id, event_type="SIGNUP_SUCCESS", ip_address=request.client.host if request.client else "unknown")
     db.commit()
-    return { "user_id": user.id, "email": user.email, "token": token }
+    
+    return { 
+        "user_id": user.id, 
+        "email": user.email, 
+        "token": token,
+        "first_name": user.first_name 
+    }
 
 @app.post("/auth/login", tags=["Auth"])
 def login(payload: UserLogin, db: DBSession, request: Request):
     user = get_user_by_email(db, payload.email)
     if not user or not verify_password_helper(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
+    
     token = create_access_token({"sub": str(user.id)})
     create_audit_log(db, user_id=user.id, event_type="LOGIN_SUCCESS", ip_address=request.client.host if request.client else "unknown")
     db.commit()
-    return { "user_id": user.id, "email": user.email, "token": token }
+    
+    return { 
+        "user_id": user.id, 
+        "email": user.email, 
+        "token": token,
+        "first_name": user.first_name 
+    }
 
 @app.get("/auth/me", tags=["Auth"])
 def me(user: AuthUser):
-    return { "user_id": user["id"], "email": user["email"] }
+    return { 
+        "user_id": user.id, 
+        "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "organization": user.organization,
+        "industry": user.industry
+    }
 
 # -------------------- AI ANALYST ROUTES --------------------
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
 async def analyze_data(payload: AIAnalysisRequest, user_id: AuthUserID, db: DBSession):
-    system_prompt = (
-        "You are a Senior Strategic Data Analyst. Respond ONLY in valid JSON. "
-        "Analyze the provided context and return exactly these keys: 'risk', 'opportunity', 'action'. "
-        "Keep insights sharp, professional, and executive-level. Limit each value to 2 sentences."
-    )
-    user_prompt = f"Data Summary: {json.dumps(payload.context)}. Provide strategic takeaways."
+    user = get_user_profile_db(db, user_id)
+    is_comparison = isinstance(payload.context, list)
+    
+    # Personalize prompt based on industry
+    industry_tag = f" specializing in the {user.industry} sector" if user.industry else ""
+
+    if is_comparison:
+        system_prompt = (
+            f"You are a Senior Strategic Data Analyst{industry_tag}. "
+            "Respond ONLY in valid JSON with keys: 'risk', 'opportunity', 'action'. "
+            "Analyze multiple datasets for cross-correlations. Limit values to 2 sentences."
+        )
+        user_prompt = f"Cross-Stream Analysis: {json.dumps(payload.context)}."
+    else:
+        system_prompt = (
+            f"You are a Senior Strategic Data Analyst{industry_tag}. Respond ONLY in valid JSON. "
+            "Analyze data and return keys: 'risk', 'opportunity', 'action'. Limit to 2 sentences."
+        )
+        user_prompt = f"Data Summary: {json.dumps(payload.context)}."
+
     raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
     return json.loads(raw_ai_response)
 
 @app.post("/ai/chat", tags=["AI Analyst"])
 async def chat_with_data(payload: AIChatRequest, user_id: AuthUserID, db: DBSession):
+    user = get_user_profile_db(db, user_id)
+    industry_context = f"The user works in {user.industry}." if user.industry else ""
+    
     system_prompt = (
-        "You are an AI Data Analyst named MetriaAI. You have access to the user's current dataset summary. "
-        "Answer questions based on the data. Be concise, use professional terminology, and avoid conversational fluff."
+        f"You are MetriaAI, a data analyst. {industry_context} "
+        "Answer questions based on data concisely and professionally."
     )
-    user_prompt = f"Dataset Context: {json.dumps(payload.context)}\n\nUser Question: {payload.message}"
-    response_text = await call_openai_analyst(user_prompt, system_prompt, json_mode=False)
+    user_prompt = f"Context: {json.dumps(payload.context)}\n\nQuestion: {payload.message}"
+    response_text = await call_openai_analyst(user_prompt, system_instruction=system_prompt, json_mode=False)
     return {"reply": response_text}
 
 # -------------------- GOOGLE OAUTH FLOW --------------------
 
 def get_google_auth_url(state: str):
-    AUTH_BASE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": GOOGLE_REDIRECT_URI,
@@ -233,7 +288,7 @@ def get_google_auth_url(state: str):
         "prompt": "consent",      
         "state": state 
     }
-    return f"{AUTH_BASE_URL}?{urlencode(params)}"
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
 
 @app.get("/auth/google_sheets", tags=["Integrations"])
 def google_oauth_start(token: str, db: Session = Depends(get_db), return_path: str = "/dashboard/integrations"):
@@ -241,14 +296,13 @@ def google_oauth_start(token: str, db: Session = Depends(get_db), return_path: s
     state_uuid = str(uuid.uuid4())
     save_state_to_db(db, user_id=user["id"], state_uuid=state_uuid, return_path=return_path)
     db.commit()
-    auth_url = get_google_auth_url(state=state_uuid)
-    return RedirectResponse(url=auth_url)
+    return RedirectResponse(url=get_google_auth_url(state=state_uuid))
 
 @app.get("/auth/callback", tags=["Integrations"], include_in_schema=False)
 async def google_oauth_callback(code: str, state: str, db: DBSession, request: Request):
     state_data = get_user_id_from_state_db(db, state_uuid=state)
     if not state_data:
-        return RedirectResponse(url="https://aianalyst-gamma.vercel.app/dashboard/integrations?connected=false&error=session_expired")
+        return RedirectResponse(url="https://aianalyst-gamma.vercel.app/dashboard/integrations?connected=false&error=expired")
         
     user_id = state_data["user_id"]
     final_return_path = state_data.get("return_path", "/dashboard/integrations")
@@ -266,11 +320,11 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
     if "access_token" in token_data:
         save_google_token(db, user_id, token_data)
         delete_state_from_db(db, state_uuid=state)
-        create_audit_log(db, user_id=user_id, event_type="GOOGLE_OAUTH_CONNECTED", ip_address=request.client.host if request.client else "unknown")
+        create_audit_log(db, user_id=user_id, event_type="GOOGLE_CONNECTED", ip_address=request.client.host if request.client else None)
         db.commit()
-        return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=true&type=google_sheets")
+        return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=true")
     
-    return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=false&error=token_exchange_failed")
+    return RedirectResponse(url=f"https://aianalyst-gamma.vercel.app{final_return_path}?connected=false")
 
 # -------------------- GOOGLE API DATA FETCHING --------------------
 
@@ -278,65 +332,38 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
 async def list_google_sheets(user_id: AuthUserID, db: DBSession):
     token_obj = get_google_token(db, user_id)
     if not token_obj:
-        raise HTTPException(status_code=401, detail="Google account not connected")
+        raise HTTPException(status_code=401, detail="Not connected")
 
     async with httpx.AsyncClient() as client:
         headers = {"Authorization": f"Bearer {token_obj.access_token}"}
-        params = {
-            "q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
-            "fields": "files(id, name)",
-            "pageSize": 50
-        }
+        params = {"q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false", "fields": "files(id, name)"}
         resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
         
         if resp.status_code == 401 and token_obj.refresh_token:
-            refresh_resp = await client.post("https://oauth2.googleapis.com/token", data={
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "refresh_token": token_obj.refresh_token,
-                "grant_type": "refresh_token",
+            # Automatic Refresh Logic
+            r = await client.post("https://oauth2.googleapis.com/token", data={
+                "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": token_obj.refresh_token, "grant_type": "refresh_token",
             })
-            if refresh_resp.status_code == 200:
-                new_tokens = refresh_resp.json()
-                token_obj.access_token = new_tokens["access_token"]
+            if r.status_code == 200:
+                token_obj.access_token = r.json()["access_token"]
                 db.commit()
                 headers["Authorization"] = f"Bearer {token_obj.access_token}"
                 resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
 
-        if resp.status_code != 200:
-            return {"files": [], "error": "Unable to fetch files from Google"}
-        return resp.json()
+        return resp.json() if resp.status_code == 200 else {"files": []}
 
 @app.get("/google/sheets/{spreadsheet_id}", tags=["Integrations"])
 async def get_google_sheet_data(spreadsheet_id: str, user_id: AuthUserID, db: DBSession):
     token_obj = get_google_token(db, user_id)
-    if not token_obj:
-        raise HTTPException(status_code=401, detail="Google account not connected")
-
+    if not token_obj: raise HTTPException(status_code=401)
     async with httpx.AsyncClient() as client:
         headers = {"Authorization": f"Bearer {token_obj.access_token}"}
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/A1:Z1000"
         resp = await client.get(url, headers=headers)
-        
-        if resp.status_code == 401 and token_obj.refresh_token:
-            refresh_resp = await client.post("https://oauth2.googleapis.com/token", data={
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "refresh_token": token_obj.refresh_token,
-                "grant_type": "refresh_token",
-            })
-            if refresh_resp.status_code == 200:
-                new_tokens = refresh_resp.json()
-                token_obj.access_token = new_tokens["access_token"]
-                db.commit()
-                headers["Authorization"] = f"Bearer {token_obj.access_token}"
-                resp = await client.get(url, headers=headers)
-        
-        if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail="Could not retrieve spreadsheet data")
         return resp.json()
 
-# -------------------- ANALYSIS SESSIONS (AUTOSAVE & PERSISTENCE) --------------------
+# -------------------- ANALYSIS SESSIONS (AUTOSAVE) --------------------
 
 class PageStateSaveRequest(BaseModel):
     name: str = "Latest Dashboard"
@@ -344,65 +371,28 @@ class PageStateSaveRequest(BaseModel):
 
 @app.post("/analysis/save", tags=["Analysis"])
 def save_analysis(payload: PageStateSaveRequest, user_id: AuthUserID, db: DBSession):
-    """Upserts the latest UI state into the Dashboard table's layout_data column."""
     snapshot_json = json.dumps(payload.page_state)
-    
-    # Check for existing dashboard to update (implementing 'Autosave' behavior)
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).first()
-    
     if dashboard:
         dashboard.layout_data = snapshot_json
-        dashboard.name = payload.name
         dashboard.last_accessed = datetime.now(timezone.utc)
     else:
-        dashboard = Dashboard(
-            user_id=user_id, 
-            name=payload.name, 
-            layout_data=snapshot_json
-        )
+        dashboard = Dashboard(user_id=user_id, name=payload.name, layout_data=snapshot_json)
         db.add(dashboard)
-    
     db.commit()
-    return {"session_id": dashboard.id, "message": "Autosave complete"}
+    return {"message": "Saved"}
 
 @app.get("/analysis/current", tags=["Analysis"])
 def get_current_analysis(user_id: AuthUserID, db: DBSession):
-    """Retrieves the latest layout_data for population on login/refresh."""
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
-    
-    if not dashboard or not dashboard.layout_data:
-        return {"id": None, "page_state": None}
-    
-    return {
-        "id": dashboard.id,
-        "name": dashboard.name,
-        "page_state": json.loads(dashboard.layout_data)
-    }
+    if not dashboard: return {"page_state": None}
+    return {"page_state": json.loads(dashboard.layout_data)}
 
-@app.get("/analysis/history", tags=["Analysis"])
-def get_analysis_history(user_id: AuthUserID, db: DBSession):
-    sessions = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.created_at.desc()).all()
-    return [{"id": s.id, "name": s.name, "created_at": s.created_at} for s in sessions]
-
-# -------------------- CONNECTED APPS & SYSTEM --------------------
-
-@app.get("/connected-apps", tags=["Integrations"])
-def get_connected_apps_status(user: AuthUser, db: DBSession):
-    google_token = get_google_token(db, user["id"])
-    return {
-        "google_sheets": google_token is not None,
-        "google_sheets_last_sync": google_token.created_at.isoformat() if google_token and google_token.created_at else None,
-    }
-
-@app.post("/disconnect/google_sheets", tags=["Integrations"])
-def disconnect_sheets(user: AuthUser, db: DBSession):
-    db.query(Token).filter(Token.user_id == user["id"], Token.service == 'google_sheets').delete()
-    db.commit()
-    return {"status": "success"}
+# -------------------- SYSTEM --------------------
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "engine": "Metria Neural Core 4.0"}
 
 @app.get("/")
 def root():
