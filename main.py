@@ -93,6 +93,10 @@ class AIChatRequest(BaseModel):
     message: str
     context: dict
 
+class CompareTrendsRequest(BaseModel):
+    base_id: int
+    target_id: int
+
 async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: bool = True):
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OpenAI API Key not configured")
@@ -166,7 +170,7 @@ def get_current_user(db: DBSession, user_id: Annotated[int, Depends(get_current_
 AuthUser = Annotated[Any, Depends(get_current_user)]
 AuthUserID = Annotated[int, Depends(get_current_user_id)]
 
-# -------------------- AUTH ROUTES --------------------
+# -------------------- AUTH & PROFILE ROUTES --------------------
 
 class UserCreate(BaseModel):
     email: EmailStr
@@ -180,12 +184,17 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class ProfileUpdateRequest(BaseModel):
+    first_name: Optional[str]
+    last_name: Optional[str]
+    organization: Optional[str]
+    industry: Optional[str]
+
 @app.post("/auth/signup", tags=["Auth"])
 def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Save user with onboarding details
     user = create_user_db(
         db, 
         email=payload.email, 
@@ -236,6 +245,21 @@ def me(user: AuthUser):
         "industry": user.industry
     }
 
+@app.put("/auth/profile/update", tags=["Auth"])
+def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSession):
+    user = get_user_profile_db(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.first_name = payload.first_name
+    user.last_name = payload.last_name
+    user.organization = payload.organization
+    user.industry = payload.industry
+    
+    db.commit()
+    db.refresh(user)
+    return user
+
 # -------------------- AI ANALYST ROUTES --------------------
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
@@ -243,7 +267,6 @@ async def analyze_data(payload: AIAnalysisRequest, user_id: AuthUserID, db: DBSe
     user = get_user_profile_db(db, user_id)
     is_comparison = isinstance(payload.context, list)
     
-    # Personalize prompt based on industry
     industry_tag = f" specializing in the {user.industry} sector" if user.industry else ""
 
     if is_comparison:
@@ -275,6 +298,27 @@ async def chat_with_data(payload: AIChatRequest, user_id: AuthUserID, db: DBSess
     user_prompt = f"Context: {json.dumps(payload.context)}\n\nQuestion: {payload.message}"
     response_text = await call_openai_analyst(user_prompt, system_instruction=system_prompt, json_mode=False)
     return {"reply": response_text}
+
+@app.post("/ai/compare-trends", tags=["AI Analyst"])
+async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
+    base_session = db.query(Dashboard).filter(Dashboard.id == payload.base_id, Dashboard.user_id == user_id).first()
+    target_session = db.query(Dashboard).filter(Dashboard.id == payload.target_id, Dashboard.user_id == user_id).first()
+
+    if not base_session or not target_session:
+        raise HTTPException(status_code=404, detail="One or both sessions not found")
+
+    base_data = json.loads(base_session.layout_data).get("ai_insight", {})
+    target_data = json.loads(target_session.layout_data).get("ai_insight", {})
+
+    system_prompt = (
+        "You are a Strategic Growth Specialist. Compare two historical AI analysis reports. "
+        "Identify what has improved, what risks have emerged, and how the strategy has evolved. "
+        "Limit to 3 sentences."
+    )
+    
+    user_prompt = f"Initial Analysis: {json.dumps(base_data)}\nLatest Analysis: {json.dumps(target_data)}"
+    comparison = await call_openai_analyst(user_prompt, system_prompt, json_mode=False)
+    return {"comparison": comparison}
 
 # -------------------- GOOGLE OAUTH FLOW --------------------
 
@@ -340,7 +384,6 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
         resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
         
         if resp.status_code == 401 and token_obj.refresh_token:
-            # Automatic Refresh Logic
             r = await client.post("https://oauth2.googleapis.com/token", data={
                 "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
                 "refresh_token": token_obj.refresh_token, "grant_type": "refresh_token",
@@ -363,7 +406,7 @@ async def get_google_sheet_data(spreadsheet_id: str, user_id: AuthUserID, db: DB
         resp = await client.get(url, headers=headers)
         return resp.json()
 
-# -------------------- ANALYSIS SESSIONS (AUTOSAVE) --------------------
+# -------------------- ANALYSIS SESSIONS & TRENDS --------------------
 
 class PageStateSaveRequest(BaseModel):
     name: str = "Latest Dashboard"
@@ -372,21 +415,37 @@ class PageStateSaveRequest(BaseModel):
 @app.post("/analysis/save", tags=["Analysis"])
 def save_analysis(payload: PageStateSaveRequest, user_id: AuthUserID, db: DBSession):
     snapshot_json = json.dumps(payload.page_state)
-    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).first()
-    if dashboard:
-        dashboard.layout_data = snapshot_json
-        dashboard.last_accessed = datetime.now(timezone.utc)
-    else:
-        dashboard = Dashboard(user_id=user_id, name=payload.name, layout_data=snapshot_json)
-        db.add(dashboard)
+    # We allow multiple saves now to support "Trends" history
+    dashboard = Dashboard(user_id=user_id, name=payload.name, layout_data=snapshot_json)
+    db.add(dashboard)
     db.commit()
-    return {"message": "Saved"}
+    return {"message": "Session Saved"}
 
 @app.get("/analysis/current", tags=["Analysis"])
 def get_current_analysis(user_id: AuthUserID, db: DBSession):
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
     if not dashboard: return {"page_state": None}
     return {"page_state": json.loads(dashboard.layout_data)}
+
+@app.get("/analysis/trends", tags=["Analysis"])
+def get_analysis_trends(user_id: AuthUserID, db: DBSession):
+    sessions = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).all()
+    trends = []
+    for s in sessions:
+        try:
+            data = json.loads(s.layout_data)
+            insight = data.get("ai_insight", {}) 
+            if insight:
+                trends.append({
+                    "id": s.id,
+                    "date": s.last_accessed,
+                    "session_name": s.name,
+                    "risk": insight.get("risk"),
+                    "opportunity": insight.get("opportunity"),
+                    "action": insight.get("action")
+                })
+        except: continue
+    return trends
 
 # -------------------- SYSTEM --------------------
 
