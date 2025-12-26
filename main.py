@@ -36,7 +36,7 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "METRIA_SECURE_PHRASE_2025")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
-API_TITLE = "Metria Neural Engine API" # Elon Upgrade: Mission Control Ready
+API_TITLE = "Metria Neural Engine API" 
 
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
@@ -104,12 +104,12 @@ async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: b
     try:
         response_format = {"type": "json_object"} if json_mode else None
         response = await client.chat.completions.create(
-            model="gpt-4o", # ELON UPGRADE: High-velocity reasoning flagship model
+            model="gpt-4o", 
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1, # Maximum precision for financial replacement
+            temperature=0.1, 
             response_format=response_format
         )
         return response.choices[0].message.content
@@ -218,7 +218,12 @@ def signup(payload: UserCreate, db: DBSession, request: Request):
         "user_id": user.id, 
         "email": user.email, 
         "token": token,
-        "first_name": user.first_name 
+        "user": {
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "organization": user.organization,
+            "industry": user.industry
+        }
     }
 
 @app.post("/auth/login", tags=["Auth"])
@@ -235,7 +240,12 @@ def login(payload: UserLogin, db: DBSession, request: Request):
         "user_id": user.id, 
         "email": user.email, 
         "token": token,
-        "first_name": user.first_name 
+        "user": {
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "organization": user.organization,
+            "industry": user.industry
+        }
     }
 
 @app.get("/auth/me", tags=["Auth"])
@@ -268,12 +278,10 @@ def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSes
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
 async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession):
-    # Dynamic Context Injection from Database
     org = user.organization if user.organization else "the organization"
     ind = user.industry if user.industry else "the current sector"
     exec_name = user.first_name if user.first_name else "Executive"
 
-    # FEW-SHOT EXAMPLES: Standardizing high-velocity output
     few_shot = (
         "EXAMPLE_INPUT: Customer churn increased 5% in the Enterprise segment this month.\n"
         "EXAMPLE_OUTPUT: {"
