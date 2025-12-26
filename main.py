@@ -36,7 +36,7 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "METRIA_SECURE_PHRASE_2025")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
-API_TITLE = "Metria Neural Engine API"
+API_TITLE = "Metria Neural Engine API" # Elon Upgrade: Mission Control Ready
 
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
@@ -79,7 +79,7 @@ DBSession = Annotated[Session, Depends(get_db)]
 def on_startup():
     try:
         Base.metadata.create_all(bind=engine) 
-        print("Database initialization successful.")
+        print("Database initialization successful. Neural Core Active.")
     except Exception as e:
         print(f"Database initialization FAILED: {e}")
 
@@ -104,12 +104,12 @@ async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: b
     try:
         response_format = {"type": "json_object"} if json_mode else None
         response = await client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o", # ELON UPGRADE: High-velocity reasoning flagship model
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2,
+            temperature=0.1, # Maximum precision for financial replacement
             response_format=response_format
         )
         return response.choices[0].message.content
@@ -117,9 +117,13 @@ async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: b
         print(f"OpenAI API Call Failed: {e}")
         if json_mode:
             return json.dumps({
-                "risk": "Neural core timeout. Verify data density.", 
+                "summary": "Neural synthesis interrupted.",
+                "root_cause": "Core timeout. Connection to data stream lost.",
+                "risk": "Operational blindness. Verify data density.", 
                 "opportunity": "Synthesis interrupted. Retry execution.", 
-                "action": "Refresh data stream and re-initialize analysis."
+                "action": "Refresh data stream and re-initialize analysis.",
+                "roi_impact": "Unknown",
+                "confidence": 0.0
             })
         return "I encountered an error processing that request."
 
@@ -263,37 +267,45 @@ def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSes
 # -------------------- AI ANALYST ROUTES --------------------
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
-async def analyze_data(payload: AIAnalysisRequest, user_id: AuthUserID, db: DBSession):
-    user = get_user_profile_db(db, user_id)
-    is_comparison = isinstance(payload.context, list)
-    
-    industry_tag = f" specializing in the {user.industry} sector" if user.industry else ""
+async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession):
+    # Dynamic Context Injection from Database
+    org = user.organization if user.organization else "the organization"
+    ind = user.industry if user.industry else "the current sector"
+    exec_name = user.first_name if user.first_name else "Executive"
 
-    if is_comparison:
-        system_prompt = (
-            f"You are a Senior Strategic Data Analyst{industry_tag}. "
-            "Respond ONLY in valid JSON with keys: 'risk', 'opportunity', 'action'. "
-            "Analyze multiple datasets for cross-correlations. Limit values to 2 sentences."
-        )
-        user_prompt = f"Cross-Stream Analysis: {json.dumps(payload.context)}."
-    else:
-        system_prompt = (
-            f"You are a Senior Strategic Data Analyst{industry_tag}. Respond ONLY in valid JSON. "
-            "Analyze data and return keys: 'risk', 'opportunity', 'action'. Limit to 2 sentences."
-        )
-        user_prompt = f"Data Summary: {json.dumps(payload.context)}."
+    # FEW-SHOT EXAMPLES: Standardizing high-velocity output
+    few_shot = (
+        "EXAMPLE_INPUT: Customer churn increased 5% in the Enterprise segment this month.\n"
+        "EXAMPLE_OUTPUT: {"
+        "\"summary\": \"Enterprise churn spike detected, threatening core recurring revenue.\", "
+        "\"root_cause\": \"Onboarding delay in the Northeast region for high-value accounts.\", "
+        "\"roi_impact\": \"-$120,000 ARR risk if not addressed within 30 days.\", "
+        "\"confidence\": 0.94}"
+    )
+
+    system_prompt = (
+        f"You are the Lead Strategic Data Analyst at {org}, specializing in {ind}. "
+        f"You are reporting to {exec_name}. Provide an elite executive-level replacement analysis. "
+        f"Respond ONLY in valid JSON.\n\n{few_shot}\n\n"
+        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'. "
+        "1. 'summary': Single powerful executive sentence (max 15 words). "
+        "2. 'root_cause': Identify the exact data driver behind this. "
+        "3. 'roi_impact': Estimated financial gain or loss prevention in USD. "
+        "4. 'confidence': Float 0.0-1.0. All fields must be concise, strategic commands."
+    )
+    user_prompt = f"Data Context: {json.dumps(payload.context)}."
 
     raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
     return json.loads(raw_ai_response)
 
 @app.post("/ai/chat", tags=["AI Analyst"])
-async def chat_with_data(payload: AIChatRequest, user_id: AuthUserID, db: DBSession):
-    user = get_user_profile_db(db, user_id)
-    industry_context = f"The user works in {user.industry}." if user.industry else ""
+async def chat_with_data(payload: AIChatRequest, user: AuthUser, db: DBSession):
+    org_ctx = f"The user works at {user.organization}." if user.organization else ""
+    ind_ctx = f"Industry: {user.industry}." if user.industry else ""
     
     system_prompt = (
-        f"You are MetriaAI, a data analyst. {industry_context} "
-        "Answer questions based on data concisely and professionally."
+        f"You are MetriaAI, an elite data analyst for {user.first_name}. {org_ctx} {ind_ctx} "
+        "Answer questions based on data with high velocity, precision, and strategic depth."
     )
     user_prompt = f"Context: {json.dumps(payload.context)}\n\nQuestion: {payload.message}"
     response_text = await call_openai_analyst(user_prompt, system_instruction=system_prompt, json_mode=False)
@@ -312,8 +324,8 @@ async def compare_historical_trends(payload: CompareTrendsRequest, user_id: Auth
 
     system_prompt = (
         "You are a Strategic Growth Specialist. Compare two historical AI analysis reports. "
-        "Identify what has improved, what risks have emerged, and how the strategy has evolved. "
-        "Limit to 3 sentences."
+        "Identify drift, improvement, and emerging delta-risks. "
+        "Provide a technical assessment of the evolution of the strategy. Limit to 3 powerful sentences."
     )
     
     user_prompt = f"Initial Analysis: {json.dumps(base_data)}\nLatest Analysis: {json.dumps(target_data)}"
@@ -329,7 +341,7 @@ def get_google_auth_url(state: str):
         "response_type": "code",
         "scope": GOOGLE_SCOPES,
         "access_type": "offline", 
-        "prompt": "consent",      
+        "prompt": "consent",       
         "state": state 
     }
     return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
@@ -351,8 +363,8 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
     user_id = state_data["user_id"]
     final_return_path = state_data.get("return_path", "/dashboard/integrations")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post("https://oauth2.googleapis.com/token", data={
+    async with httpx.AsyncClient() as client_http:
+        resp = await client_http.post("https://oauth2.googleapis.com/token", data={
             "code": code,
             "client_id": GOOGLE_CLIENT_ID,
             "client_secret": GOOGLE_CLIENT_SECRET,
@@ -378,13 +390,13 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
     if not token_obj:
         raise HTTPException(status_code=401, detail="Not connected")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as client_http:
         headers = {"Authorization": f"Bearer {token_obj.access_token}"}
         params = {"q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false", "fields": "files(id, name)"}
-        resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+        resp = await client_http.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
         
         if resp.status_code == 401 and token_obj.refresh_token:
-            r = await client.post("https://oauth2.googleapis.com/token", data={
+            r = await client_http.post("https://oauth2.googleapis.com/token", data={
                 "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
                 "refresh_token": token_obj.refresh_token, "grant_type": "refresh_token",
             })
@@ -392,7 +404,7 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
                 token_obj.access_token = r.json()["access_token"]
                 db.commit()
                 headers["Authorization"] = f"Bearer {token_obj.access_token}"
-                resp = await client.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
+                resp = await client_http.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
 
         return resp.json() if resp.status_code == 200 else {"files": []}
 
@@ -400,10 +412,10 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
 async def get_google_sheet_data(spreadsheet_id: str, user_id: AuthUserID, db: DBSession):
     token_obj = get_google_token(db, user_id)
     if not token_obj: raise HTTPException(status_code=401)
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as client_http:
         headers = {"Authorization": f"Bearer {token_obj.access_token}"}
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/A1:Z1000"
-        resp = await client.get(url, headers=headers)
+        resp = await client_http.get(url, headers=headers)
         return resp.json()
 
 # -------------------- ANALYSIS SESSIONS & TRENDS --------------------
@@ -415,7 +427,6 @@ class PageStateSaveRequest(BaseModel):
 @app.post("/analysis/save", tags=["Analysis"])
 def save_analysis(payload: PageStateSaveRequest, user_id: AuthUserID, db: DBSession):
     snapshot_json = json.dumps(payload.page_state)
-    # We allow multiple saves now to support "Trends" history
     dashboard = Dashboard(user_id=user_id, name=payload.name, layout_data=snapshot_json)
     db.add(dashboard)
     db.commit()
@@ -425,7 +436,11 @@ def save_analysis(payload: PageStateSaveRequest, user_id: AuthUserID, db: DBSess
 def get_current_analysis(user_id: AuthUserID, db: DBSession):
     dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
     if not dashboard: return {"page_state": None}
-    return {"page_state": json.loads(dashboard.layout_data)}
+    return {
+        "id": dashboard.id,
+        "updated_at": dashboard.last_accessed,
+        "page_state": json.loads(dashboard.layout_data)
+    }
 
 @app.get("/analysis/trends", tags=["Analysis"])
 def get_analysis_trends(user_id: AuthUserID, db: DBSession):
@@ -434,25 +449,34 @@ def get_analysis_trends(user_id: AuthUserID, db: DBSession):
     for s in sessions:
         try:
             data = json.loads(s.layout_data)
-            insight = data.get("ai_insight", {}) 
+            insight = data.get("ai_insight")
+            if not insight and data.get("allDatasets"):
+                insight = data["allDatasets"][0].get("aiStorage")
+                
             if insight:
                 trends.append({
                     "id": s.id,
                     "date": s.last_accessed,
                     "session_name": s.name,
+                    "summary": insight.get("summary", "No summary available."),
                     "risk": insight.get("risk"),
                     "opportunity": insight.get("opportunity"),
-                    "action": insight.get("action")
+                    "action": insight.get("action"),
+                    "root_cause": insight.get("root_cause"),
+                    "roi": insight.get("roi_impact"),
+                    "confidence": insight.get("confidence")
                 })
-        except: continue
+        except Exception as e: 
+            print(f"Trend parsing error for ID {s.id}: {e}")
+            continue
     return trends
 
 # -------------------- SYSTEM --------------------
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": "Metria Neural Core 4.0"}
+    return {"status": "ok", "engine": "Metria Neural Core 5.0 - High Velocity Tier"}
 
 @app.get("/")
 def root():
-    return {"message": "MetriaAI API Online"}
+    return {"message": "MetriaAI API Online - Mission Ready"}
