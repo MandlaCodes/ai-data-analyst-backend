@@ -42,7 +42,7 @@ GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI")
 GOOGLE_SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly profile email"
-FRONTEND_URL = "https://aianalyst-gamma.vercel.app"
+FRONTEND_URL = "https://metria.dev"
 
 # Initialize Async OpenAI Client
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
