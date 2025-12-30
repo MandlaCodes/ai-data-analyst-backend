@@ -275,69 +275,93 @@ def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSes
     db.refresh(user)
     return user
 
-# -------------------- AI ANALYST ROUTES --------------------
-
 @app.post("/ai/analyze", tags=["AI Analyst"])
 async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession):
+    # Mapping exact names from your User DB (db.py)
     org = user.organization if user.organization else "the organization"
     ind = user.industry if user.industry else "the current sector"
     exec_name = user.first_name if user.first_name else "Executive"
 
+    # Improved few-shot to show the AI how to handle long-form paragraphs
     few_shot = (
         "EXAMPLE_INPUT: Customer churn increased 5% in the Enterprise segment this month.\n"
         "EXAMPLE_OUTPUT: {"
         "\"summary\": \"Enterprise churn spike detected, threatening core recurring revenue.\", "
-        "\"root_cause\": \"Onboarding delay in the Northeast region for high-value accounts.\", "
-        "\"roi_impact\": \"-$120,000 ARR risk if not addressed within 30 days.\", "
+        "\"root_cause\": \"Technical friction in the API integration layer for Tier-1 clients.\", "
+        "\"risk\": \"The current escalation in churn suggests a potential loss of $2M in LTV if the integration friction is not resolved. This pattern specifically threatens the Q3 expansion targets in the enterprise sector. Failure to intervene will likely trigger a competitor migration wave.\", "
+        "\"opportunity\": \"By automating the API troubleshooting, we can improve retention by 12% across all high-value accounts. This efficiency gain allows the Success Team to focus on upsell opportunities rather than fire-fighting. Implementation creates a distinct competitive advantage in service reliability.\", "
+        "\"action\": \"Immediately deploy the engineering task force to patch the integration gateway. Simultaneously, the Executive Success team should initiate high-touch outreach to the top 10 impacted accounts. Schedule a post-mortem for Friday to prevent recurrence.\", "
+        "\"roi_impact\": \"-$120,000 ARR risk prevention\", "
         "\"confidence\": 0.94}"
     )
 
     system_prompt = (
-        f"You are the Lead Strategic Data Analyst at {org}, specializing in {ind}. "
-        f"You are reporting to {exec_name}. Provide an elite executive-level replacement analysis. "
-        f"Respond ONLY in valid JSON.\n\n{few_shot}\n\n"
-        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'. "
-        "1. 'summary': Single powerful executive sentence (max 15 words). "
-        "2. 'root_cause': Identify the exact data driver behind this. "
-        "3. 'roi_impact': Estimated financial gain or loss prevention in USD. "
-        "4. 'confidence': Float 0.0-1.0. All fields must be concise, strategic commands."
+        f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
+        f"You are reporting to {exec_name}. Provide an elite executive-level analysis that replaces the need for a human consultant and data analyst. "
+        "Respond ONLY in valid JSON.\n\n"
+        f"{few_shot}\n\n"
+        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'.\n\n"
+        "CONSTRAINTS:\n"
+        "1. 'summary': A high-impact executive statement (max 30 words).\n"
+        "2. 'risk', 'opportunity', 'action': These MUST be detailed paragraphs. For each, provide a MINIMUM of 3 deep, "
+        f"analytical sentences. Connect the insights specifically to the {ind} industry and {org}'s unique position.\n"
+        "3. 'root_cause': A technical and data-driven explanation of the primary driver.\n"
+        "4. 'roi_impact': Estimated financial impact in USD (e.g., '$50k - $100k').\n"
+        "5. 'confidence': Float 0.0-1.0.\n"
+        "STYLE: Use professional, high-velocity language. Avoid generic advice; focus on tactical precision."
     )
+
     user_prompt = f"Data Context: {json.dumps(payload.context)}."
 
-    raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
-    return json.loads(raw_ai_response)
+    try:
+        raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
+        parsed_response = json.loads(raw_ai_response)
+        
+        # Security check: Ensure 'summary' exists even if AI uses 'executive_summary'
+        if "executive_summary" in parsed_response and "summary" not in parsed_response:
+            parsed_response["summary"] = parsed_response["executive_summary"]
+            
+        return parsed_response
+    except Exception as e:
+        print(f"AI Analysis Logic Error: {e}")
+        raise HTTPException(status_code=500, detail="Neural Engine failed to synthesize data.")
 
 @app.post("/ai/chat", tags=["AI Analyst"])
 async def chat_with_data(payload: AIChatRequest, user: AuthUser, db: DBSession):
     org_ctx = f"The user works at {user.organization}." if user.organization else ""
     ind_ctx = f"Industry: {user.industry}." if user.industry else ""
+    exec_name = user.first_name if user.first_name else "Client"
     
     system_prompt = (
-        f"You are MetriaAI, an elite data analyst for {user.first_name}. {org_ctx} {ind_ctx} "
-        "Answer questions based on data with high velocity, precision, and strategic depth."
+        f"You are MetriaAI, an elite data analyst for {exec_name}. {org_ctx} {ind_ctx} "
+        "Answer questions based on the provided data context with high precision and strategic depth. "
+        "Maintain a professional, executive tone."
     )
     user_prompt = f"Context: {json.dumps(payload.context)}\n\nQuestion: {payload.message}"
+    
     response_text = await call_openai_analyst(user_prompt, system_instruction=system_prompt, json_mode=False)
     return {"reply": response_text}
 
 @app.post("/ai/compare-trends", tags=["AI Analyst"])
 async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
+    # Using your Dashboard model from db.py
     base_session = db.query(Dashboard).filter(Dashboard.id == payload.base_id, Dashboard.user_id == user_id).first()
     target_session = db.query(Dashboard).filter(Dashboard.id == payload.target_id, Dashboard.user_id == user_id).first()
 
     if not base_session or not target_session:
         raise HTTPException(status_code=404, detail="One or both sessions not found")
 
+    # Extracting the AI storage from your layout_data Text column
     base_data = json.loads(base_session.layout_data).get("ai_insight", {})
     target_data = json.loads(target_session.layout_data).get("ai_insight", {})
 
     system_prompt = (
-        "You are a Strategic Growth Specialist. Compare two historical AI analysis reports. "
-        "Identify drift, improvement, and emerging delta-risks. "
-        "Provide a technical assessment of the evolution of the strategy. Limit to 3 powerful sentences."
+        "You are a Strategic Growth Specialist. Compare these two historical reports. "
+        "Identify metrics drift, performance improvements, and emerging delta-risks. "
+        "Provide a technical assessment of how the strategy has evolved. Limit to 3 powerful, data-backed sentences."
     )
     
-    user_prompt = f"Initial Analysis: {json.dumps(base_data)}\nLatest Analysis: {json.dumps(target_data)}"
+    user_prompt = f"Previous Analysis: {json.dumps(base_data)}\nCurrent Analysis: {json.dumps(target_data)}"
     comparison = await call_openai_analyst(user_prompt, system_prompt, json_mode=False)
     return {"comparison": comparison}
 
