@@ -530,3 +530,38 @@ def health():
 @app.get("/")
 def root():
     return {"message": "MetriaAI API Online - Mission Ready"}
+# Add this inside main.py, preferably near the other Google routes
+
+@app.get("/google-token", tags=["Integrations"])
+async def get_active_google_token(user_id: AuthUserID, db: DBSession):
+    """
+    Retrieves the raw Google Access Token for the Picker API.
+    Handles automatic refreshing if the token is expired.
+    """
+    token_obj = get_google_token(db, user_id)
+    if not token_obj:
+        raise HTTPException(status_code=404, detail="Google account not connected")
+
+    # Check if token is expired or about to expire (within 1 minute)
+    now = datetime.now(timezone.utc)
+    if token_obj.expires_at and token_obj.expires_at <= (now + timedelta(minutes=1)):
+        if token_obj.refresh_token:
+            async with httpx.AsyncClient() as client_http:
+                r = await client_http.post("https://oauth2.googleapis.com/token", data={
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "refresh_token": token_obj.refresh_token,
+                    "grant_type": "refresh_token",
+                })
+                if r.status_code == 200:
+                    new_data = r.json()
+                    token_obj.access_token = new_data["access_token"]
+                    if "expires_in" in new_data:
+                        token_obj.expires_at = now + timedelta(seconds=new_data["expires_in"])
+                    db.commit()
+                else:
+                    raise HTTPException(status_code=401, detail="Session expired. Please reconnect Google.")
+        else:
+            raise HTTPException(status_code=401, detail="Token expired and no refresh token available.")
+
+    return {"access_token": token_obj.access_token}
