@@ -67,6 +67,13 @@ class Dashboard(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     name: Mapped[str] = mapped_column(String)
     layout_data: Mapped[str] = mapped_column(Text) 
+    
+    # NEW FIELDS FOR LIVE SYNC
+    spreadsheet_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    sheet_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_sync_version: Mapped[Optional[str]] = mapped_column(String, nullable=True) # To track changes
+    auto_sync: Mapped[bool] = mapped_column(Boolean, default=False)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_accessed: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -123,7 +130,6 @@ def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
 
 def get_user_profile_db(db: Session, user_id: int) -> Optional[User]:
-    # Optimization: get() is faster for PK lookups
     return db.query(User).filter(User.id == user_id).first()
 
 def create_audit_log(db: Session, user_id: int, event_type: str, ip_address: Optional[str] = None):
@@ -158,7 +164,6 @@ def get_user_id_from_state_db(db: Session, state_uuid: str) -> Optional[dict]:
     if not state_record:
         return None
     
-    # Critical Fix: Ensure comparison is timezone aware
     expiry = state_record.expires_at
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
