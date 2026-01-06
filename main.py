@@ -296,20 +296,25 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     )
 
     system_prompt = (
-        f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
-        f"You are reporting to {exec_name}. Provide an elite executive-level analysis that replaces the need for a human consultant and data analyst. "
-        "Respond ONLY in valid JSON.\n\n"
-        f"{few_shot}\n\n"
-        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'.\n\n"
-        "CONSTRAINTS:\n"
-        "1. 'summary': A high-impact executive statement (max 30 words).\n"
-        "2. 'risk', 'opportunity', 'action': These MUST be detailed paragraphs. For each, provide a MINIMUM of 3 deep, "
-        f"analytical sentences. Connect the insights specifically to the {ind} industry and {org}'s unique position.\n"
-        "3. 'root_cause': A technical and data-driven explanation of the primary driver.\n"
-        "4. 'roi_impact': Estimated financial impact in USD (e.g., '$50k - $100k').\n"
-        "5. 'confidence': Float 0.0-1.0.\n"
-        "STYLE: Use professional, high-velocity language. Avoid generic advice; focus on tactical precision."
-    )
+    f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
+    f"You are reporting to {exec_name}. Provide an elite executive-level analysis that replaces the need for a human consultant and data analyst. "
+    "Respond ONLY in valid JSON.\n\n"
+    f"{few_shot}\n\n"
+    "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'.\n\n"
+    "CONSTRAINTS:\n"
+    "1. 'summary': A high-impact executive statement (2-3 sentences maximum).\n"
+    "2. 'risk', 'opportunity', 'action': Each MUST be detailed paragraphs with a MINIMUM of 3 deep analytical sentences. "
+    f"Connect the insights specifically to the {ind} industry and {org}'s unique position.\n"
+    "3. 'root_cause': Provide a technical, data-driven explanation of the primary driver(s) detected.\n"
+    "4. 'roi_impact': Estimated financial impact in local currency (e.g., '$50k - $100k'). Include assumptions if relevant.\n"
+    "5. 'confidence': Float 0.0-1.0.\n"
+    "ADDITIONAL INSTRUCTIONS:\n"
+    "- Detect trends, anomalies, and patterns in numeric and categorical data.\n"
+    "- Quantify impacts (financial, operational, or performance metrics) wherever possible.\n"
+    "- Include breakdowns by time period, category, region, or staff if applicable.\n"
+    "STYLE: Use professional, high-velocity language. Avoid generic advice; focus on tactical precision."
+)
+
 
     user_prompt = f"Data Context: {json.dumps(payload.context)}."
 
