@@ -18,6 +18,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from jose import jwt, JWTError
 from openai import AsyncOpenAI
+from standardwebhooks import Webhook
 
 # IMPORTANT: Notice we DO NOT import get_db because it isn't in db.py
 from db import (
@@ -67,7 +68,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-polar = Polar(access_token=os.environ.get("POLAR_ACCESS_TOKEN"))
+
 
 # Your Webhook Secret from the Polar Dashboard
 POLAR_WEBHOOK_SECRET = os.environ.get("POLAR_WEBHOOK_SECRET")
@@ -211,62 +212,45 @@ class CheckoutRequest(BaseModel):
 async def polar_webhook(request: Request):
     payload = await request.body()
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
-    
-    # Polar signature looks like: "v1,bm90aGluZyB0byBzZWUgaGVyZQ=="
-    header = request.headers.get("webhook-signature")
+    headers = dict(request.headers)
 
-    if not header or not secret:
-        print("WEBHOOK ERROR: Missing Header or Secret")
-        raise HTTPException(status_code=401)
+    if not secret:
+        print("WEBHOOK ERROR: POLAR_WEBHOOK_SECRET not set in Render")
+        raise HTTPException(status_code=500)
 
+    # 1. Official Signature Verification
     try:
-        # 1. Parse the version and signature from the header
-        # Polar uses "v1,signature_value"
-        parts = header.split(",")
-        if len(parts) < 2:
-            raise ValueError("Invalid header format")
-        
-        received_sig = parts[1]
+        wh = Webhook(secret)
+        wh.verify(payload, headers)
+    except Exception as e:
+        print(f"WEBHOOK SIGNATURE VERIFICATION FAILED: {e}")
+        raise HTTPException(status_code=401, detail="Invalid signature")
 
-        # 2. Calculate the expected signature
-        # We use the raw payload and the secret
-        expected_sig = hmac.new(
-            secret.encode('utf-8'),
-            payload,
-            hashlib.sha256
-        ).hexdigest()
-
-        # 3. Secure comparison
-        # Note: If Polar sends a hex string, compare directly. 
-        # If they send base64, we'd need to b64encode the expected_sig.
-        if not hmac.compare_digest(expected_sig, received_sig):
-            print(f"WEBHOOK ERROR: Signature Mismatch.")
-            print(f"DEBUG: Header received: {received_sig[:10]}...")
-            print(f"DEBUG: Expected: {expected_sig[:10]}...")
-            raise HTTPException(status_code=401)
-
-        # 4. Validated - Process Database Update
+    # 2. Process Database Update
+    try:
         data = json.loads(payload)
         if data.get("type") == "order.created":
             event_data = data.get("data", {})
+            # Look for email in the nested customer object
             customer_email = event_data.get("customer_email") or event_data.get("customer", {}).get("email")
             sub_id = event_data.get("subscription_id")
 
-            db = SessionLocal()
-            try:
-                user = activate_user_subscription(db, customer_email, sub_id)
-                if user:
-                    print(f"SUCCESS: {customer_email} is now ACTIVE.")
-                else:
-                    print(f"DB ERROR: User {customer_email} not found.")
-            finally:
-                db.close()
+            if customer_email:
+                db = SessionLocal()
+                try:
+                    user = activate_user_subscription(db, customer_email, sub_id)
+                    if user:
+                        print(f"VOILA! {customer_email} is now ACTIVE in the DB.")
+                    else:
+                        print(f"DB ERROR: User {customer_email} not found.")
+                finally:
+                    db.close()
             
         return {"status": "success"}
 
     except Exception as e:
         print(f"WEBHOOK PROCESSING ERROR: {e}")
-        raise HTTPException(status_code=401, detail="Webhook verification failed")
+        return {"status": "error"}
 
 @app.get("/api/auth/status")
 async def get_subscription_status(
