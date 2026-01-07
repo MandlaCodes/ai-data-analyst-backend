@@ -1,3 +1,4 @@
+# --- CLEAN THESE IMPORTS ---
 import os
 import sys
 import json
@@ -5,31 +6,20 @@ import httpx
 import uuid
 import hmac
 import hashlib
-import os
-import json
-from fastapi import Request, HTTPException, Header, Depends
-from sqlalchemy.orm import Session
-# Change this line:
-from db import SessionLocal, activate_user_subscription
-from checkout import create_metria_checkout  # Import your logic engine
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List, Union, Any
 from urllib.parse import urlencode 
-from polar_sdk import Polar
 
-# FastAPI and dependencies
-from fastapi import FastAPI, Depends, HTTPException, Query, status, Request, Header
+from fastapi import FastAPI, Request, HTTPException, Header, Depends, Query, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
 from fastapi.responses import RedirectResponse, JSONResponse
-from pydantic import BaseModel, EmailStr 
-from jose import jwt, JWTError
 from fastapi.security import OAuth2PasswordBearer
-
-# Official OpenAI SDK
+from pydantic import BaseModel, EmailStr 
+from sqlalchemy.orm import Session
+from jose import jwt, JWTError
 from openai import AsyncOpenAI
 
-# Import all models, engine, and helper functions from db.py
+# IMPORTANT: Notice we DO NOT import get_db because it isn't in db.py
 from db import (
     User, AuditLog, Dashboard, Settings, Token, StateToken,
     Base, engine, SessionLocal,
@@ -39,8 +29,10 @@ from db import (
     save_google_token, get_google_token, 
     save_state_to_db, get_user_id_from_state_db, delete_state_from_db,
     verify_password_helper,
-    activate_user_subscription  # <--- CRITICAL ADDITION
+    activate_user_subscription
 )
+from checkout import create_metria_checkout 
+# --- END CLEAN IMPORTS ---
 
 
 # --- Environment and Configuration ---
@@ -214,56 +206,64 @@ class CheckoutRequest(BaseModel):
     email: EmailStr
 
 
-import hmac
-import hashlib
-import os
-import json
-from fastapi import Request, HTTPException
-# These two exist in your db.py, so the import will work perfectly
-from db import SessionLocal, activate_user_subscription 
 
 @app.post("/webhook/polar")
 async def polar_webhook(request: Request):
+    # 1. Capture the raw body and headers
     payload = await request.body()
-    secret = os.environ.get("POLAR_WEBHOOK_SECRET")
+    # Polar sends the signature in 'webhook-signature'
     signature = request.headers.get("webhook-signature")
+    secret = os.environ.get("POLAR_WEBHOOK_SECRET")
 
-    # 1. Verification (Manual HMAC - No SDK needed)
     if not signature or not secret:
-        raise HTTPException(status_code=401)
+        print("WEBHOOK ERROR: Missing signature or secret environment variable.")
+        raise HTTPException(status_code=401, detail="Missing signature")
 
+    # 2. Precise Signature Verification
+    # We use hmac with sha256 to verify the raw payload against your secret
     expected_sig = hmac.new(
-        secret.encode(), 
-        payload, 
+        secret.encode('utf-8'),
+        payload,
         hashlib.sha256
     ).hexdigest()
 
+    # Note: If Polar uses the 'v1,signature' format, we'd need to split it.
+    # But for a direct comparison with the hex digest:
     if not hmac.compare_digest(expected_sig, signature):
-        print("WEBHOOK ERROR: Signature Mismatch")
-        raise HTTPException(status_code=401)
+        # Fallback check: Some Polar versions prefix signatures. 
+        # If the direct check fails, we log it to see the format.
+        print(f"WEBHOOK ERROR: Signature Mismatch.")
+        print(f"DEBUG: Received: {signature[:15]}... Expected: {expected_sig[:15]}...")
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
-    # 2. Database Update
+    # 3. Validated! Now update the Database
     try:
         data = json.loads(payload)
+        # In the payload you shared, the email is in data['data']['customer']['email'] 
+        # or data['data']['customer_email']. We'll check both.
+        
         if data.get("type") == "order.created":
-            customer_email = data["data"]["customer_email"]
-            sub_id = data["data"].get("subscription_id")
+            event_data = data.get("data", {})
+            customer_email = event_data.get("customer_email") or event_data.get("customer", {}).get("email")
+            sub_id = event_data.get("subscription_id")
 
-            # We use SessionLocal() directly because it's in your db.py
-            db = SessionLocal()
-            try:
-                user = activate_user_subscription(db, customer_email, sub_id)
-                if user:
-                    print(f"SUCCESS: {customer_email} activated in DB.")
-                else:
-                    print(f"NOT FOUND: User {customer_email} doesn't exist.")
-            finally:
-                db.close()
+            if customer_email:
+                db = SessionLocal()
+                try:
+                    user = activate_user_subscription(db, customer_email, sub_id)
+                    if user:
+                        print(f"SUCCESS: {customer_email} subscription activated.")
+                    else:
+                        print(f"DB ERROR: User {customer_email} not found in database.")
+                finally:
+                    db.close()
+            else:
+                print("WEBHOOK ERROR: No customer email found in payload.")
             
         return {"status": "success"}
 
     except Exception as e:
-        print(f"WEBHOOK PROCESSING ERROR: {e}")
+        print(f"WEBHOOK PROCESSING ERROR: {str(e)}")
         return {"status": "error"}
 
 @app.get("/api/auth/status")
