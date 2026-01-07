@@ -3,6 +3,13 @@ import sys
 import json
 import httpx 
 import uuid
+import hmac
+import hashlib
+import os
+import json
+from fastapi import Request, HTTPException, Header, Depends
+from sqlalchemy.orm import Session
+from db import get_db, activate_user_subscription
 from checkout import create_metria_checkout  # Import your logic engine
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List, Union, Any
@@ -205,48 +212,59 @@ class ProfileUpdateRequest(BaseModel):
 class CheckoutRequest(BaseModel):
     email: EmailStr
 
+
+
 @app.post("/webhook/polar")
 async def polar_webhook(
     request: Request, 
     db: Session = Depends(get_db), 
-    # Use Header(None) but check for the common Polar names
     webhook_signature: str = Header(None, alias="webhook-signature"),
     x_polar_signature: str = Header(None, alias="x-polar-signature")
 ):
     payload = await request.body()
-
-    # Use whichever signature actually showed up
+    
+    # 1. Grab the signature and the secret
     sig = webhook_signature or x_polar_signature
+    secret = os.environ.get("POLAR_WEBHOOK_SECRET")
 
-    if not sig:
-        print("WEBHOOK ERROR: No signature header found in request")
-        raise HTTPException(status_code=401, detail="Missing signature")
+    if not sig or not secret:
+        print(f"WEBHOOK ERROR: Missing Sig ({bool(sig)}) or Secret ({bool(secret)})")
+        raise HTTPException(status_code=401, detail="Missing signature or secret")
 
+    # 2. MANUAL VERIFICATION (Replaces the broken polar.webhooks.validate)
+    # We create a hash of the payload using your secret and compare it to Polar's signature
+    expected_sig = hmac.new(
+        secret.encode(), 
+        payload, 
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_sig, sig):
+        print("WEBHOOK ERROR: Signature Mismatch. Check your POLAR_WEBHOOK_SECRET in Render.")
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    # 3. SUCCESS - Handle the data
     try:
-        # Pass the verified signature and your secret
-        event = polar.webhooks.validate(
-            payload=payload,
-            signature=sig,
-            secret=os.environ.get("POLAR_WEBHOOK_SECRET")
-        )
+        event = json.loads(payload)
+        
+        if event.get("type") == "order.created":
+            event_data = event.get("data", {})
+            customer_email = event_data.get("customer_email")
+            subscription_id = event_data.get("subscription_id")
 
-        if event["type"] == "order.created":
-            customer_email = event["data"]["customer_email"]
-            subscription_id = event["data"].get("subscription_id")
-
-            activated_user = activate_user_subscription(db, customer_email, subscription_id)
-
-            if activated_user:
-                print(f"VOILA! {customer_email} is now ACTIVE.")
-            else:
-                print(f"ERROR: Payment received for {customer_email} but user not found in DB.")
-
+            if customer_email:
+                activated_user = activate_user_subscription(db, customer_email, subscription_id)
+                if activated_user:
+                    print(f"VOILA! {customer_email} is now ACTIVE.")
+                else:
+                    print(f"DATABASE ERROR: User {customer_email} not found during activation.")
+            
         return {"status": "success"}
 
     except Exception as e:
-        print(f"Webhook error: {e}")
-        # Return 401 for signature issues so Polar knows to retry
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+        print(f"PROCESSING ERROR: {str(e)}")
+        # We return 200 here so Polar stops retrying if the signature was valid but our DB logic failed
+        return {"status": "error", "message": str(e)}
 
 @app.get("/api/auth/status")
 async def get_subscription_status(
