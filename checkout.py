@@ -5,7 +5,7 @@ from db import SessionLocal, get_user_by_email
 def create_metria_checkout(customer_email: str) -> str:
     """
     Final fix for Polar SDK v0.28.1.
-    The 'custom' attribute is missing, so we use the direct checkouts create method.
+    This version uses 'variant_id' instead of 'product_id'.
     """
     db = SessionLocal()
     try:
@@ -16,7 +16,8 @@ def create_metria_checkout(customer_email: str) -> str:
             return None
             
         token = os.environ.get("POLAR_ACCESS_TOKEN")
-        product_id = os.environ.get("POLAR_PRODUCT_ID")
+        # Ensure this is the ID you provided earlier
+        product_id = os.environ.get("POLAR_PRODUCT_ID") 
 
         if not token or not product_id:
             print("CHECKOUT ERROR: Missing Environment Variables.")
@@ -26,9 +27,9 @@ def create_metria_checkout(customer_email: str) -> str:
         polar = Polar(access_token=token)
         
         # 3. Create checkout
-        # In v0.28.1, the path is polar.checkouts.create (removing .custom)
+        # In v0.28.1, the argument name is 'variant_id'
         res = polar.checkouts.create(
-            product_id=product_id,
+            variant_id=product_id,
             success_url="https://metria.dev/dashboard?payment=success",
             customer_email=customer_email,
             metadata={
@@ -44,7 +45,6 @@ def create_metria_checkout(customer_email: str) -> str:
         return None
 
     except Exception as e:
-        # This will now catch if 'create' is also in a different spot
         print(f"SDK ERROR DETAIL: {str(e)}")
         return None
     finally:
