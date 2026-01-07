@@ -4,52 +4,47 @@ from db import SessionLocal, get_user_by_email
 
 def create_metria_checkout(customer_email: str) -> str:
     """
-    Generates a Polar Checkout URL for the 'Hire Your AI Analyst' flow.
-    Updated for Polar SDK v1.1.0+ (using request object structure).
+    Generates a Polar Checkout URL.
+    Syntax adjusted for Polar SDK v0.28.1.
     """
     db = SessionLocal()
     try:
-        # 1. Verify user exists in the production DB
+        # 1. Verify user exists
         user = get_user_by_email(db, customer_email)
         if not user:
-            print(f"CHECKOUT ERROR: User {customer_email} not found in DB.")
+            print(f"CHECKOUT ERROR: User {customer_email} not found.")
             return None
             
         token = os.environ.get("POLAR_ACCESS_TOKEN")
         product_id = os.environ.get("POLAR_PRODUCT_ID")
 
-        # 2. Safety check for Environment Variables
         if not token or not product_id:
-            print("CHECKOUT ERROR: POLAR_ACCESS_TOKEN or POLAR_PRODUCT_ID missing in Render.")
+            print("CHECKOUT ERROR: Environment variables missing.")
             return None
 
-        # 3. Initialize Polar Client
+        # 2. Initialize Client
         polar = Polar(access_token=token)
         
-        # 4. Create the checkout session
-        # CRITICAL FIX: SDK v1.1.0+ expects a 'request' argument with the data
+        # 3. Create checkout using v0.x syntax
+        # In this version, product_id is a direct keyword argument
         res = polar.checkouts.custom.create(
-            request={
-                "products": [product_id],
-                "success_url": "https://metria.dev/dashboard?payment=success",
-                "customer_email": customer_email,
-                "metadata": {
-                    "user_id": str(user.id),
-                    "email": customer_email
-                }
+            product_id=product_id,
+            success_url="https://metria.dev/dashboard?payment=success",
+            customer_email=customer_email,
+            metadata={
+                "user_id": str(user.id),
+                "email": customer_email
             }
         )
         
-        # Accessing the URL from the response object
+        # 4. Return the URL
         if res and hasattr(res, 'url'):
-            print(f"CHECKOUT SUCCESS: URL generated for {customer_email}")
+            print(f"CHECKOUT SUCCESS: {res.url}")
             return res.url
-        
-        print("CHECKOUT ERROR: Polar response did not contain a URL.")
+            
         return None
 
     except Exception as e:
-        # This catches the schema validation errors or API errors
         print(f"CRITICAL POLAR SDK ERROR: {str(e)}")
         return None
     finally:
