@@ -214,52 +214,63 @@ class CheckoutRequest(BaseModel):
 
 
 
+import hmac
+import hashlib
+import os
+import json
+from fastapi import Request, HTTPException, Header
+# We import exactly what exists in your db.py
+from db import SessionLocal, activate_user_subscription
+
 @app.post("/webhook/polar")
-async def polar_webhook(
-    request: Request, 
-    db: Session = Depends(get_db), 
-    webhook_signature: str = Header(None, alias="webhook-signature"),
-    x_polar_signature: str = Header(None, alias="x-polar-signature")
-):
+async def polar_webhook(request: Request):
+    # 1. Capture raw body and the secret you added to Render
     payload = await request.body()
-    
-    # 1. Grab the signature and the secret
-    sig = webhook_signature or x_polar_signature
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
 
-    if not sig or not secret:
-        print(f"WEBHOOK ERROR: Missing Sig ({bool(sig)}) or Secret ({bool(secret)})")
-        raise HTTPException(status_code=401, detail="Missing signature or secret")
+    # Polar sends the signature in 'webhook-signature'
+    signature = request.headers.get("webhook-signature")
 
-    # 2. MANUAL VERIFICATION (Replaces the broken polar.webhooks.validate)
-    # We create a hash of the payload using your secret and compare it to Polar's signature
+    if not signature or not secret:
+        print(f"WEBHOOK 401: Signature present: {bool(signature)}, Secret present: {bool(secret)}")
+        raise HTTPException(status_code=401, detail="Missing configuration")
+
+    # 2. Manual HMAC Verification (No SDK required)
     expected_sig = hmac.new(
-        secret.encode(), 
-        payload, 
+        secret.encode(),
+        payload,
         hashlib.sha256
     ).hexdigest()
 
-    if not hmac.compare_digest(expected_sig, sig):
-        print("WEBHOOK ERROR: Signature Mismatch. Check your POLAR_WEBHOOK_SECRET in Render.")
+    if not hmac.compare_digest(expected_sig, signature):
+        print("WEBHOOK 401: Signature Mismatch. Verify your POLAR_WEBHOOK_SECRET.")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # 3. SUCCESS - Handle the data
+    # 3. Process Success
     try:
         event = json.loads(payload)
-        
         if event.get("type") == "order.created":
             event_data = event.get("data", {})
             customer_email = event_data.get("customer_email")
             subscription_id = event_data.get("subscription_id")
 
-            if customer_email:
+            # Open a fresh session using your working SessionLocal
+            db = SessionLocal()
+            try:
                 activated_user = activate_user_subscription(db, customer_email, subscription_id)
                 if activated_user:
-                    print(f"VOILA! {customer_email} is now ACTIVE.")
+                    print(f"SUCCESS: {customer_email} is now ACTIVE.")
                 else:
-                    print(f"DATABASE ERROR: User {customer_email} not found during activation.")
-            
+                    print(f"DB ERROR: Could not find user with email {customer_email}")
+            finally:
+                db.close() # Always close the connection
+
         return {"status": "success"}
+
+    except Exception as e:
+        print(f"WEBHOOK PROCESSING ERROR: {str(e)}")
+        # We return 200 so Polar doesn't keep retrying a malformed JSON
+        return {"status": "error", "message": str(e)}
 
     except Exception as e:
         print(f"PROCESSING ERROR: {str(e)}")
@@ -294,11 +305,11 @@ async def generate_checkout_link(payload: CheckoutRequest):
 def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     # is_active will default to False here
     user = create_user_db(
         db,
-        email=payload.email, 
+        email=payload.email,
         password=payload.password,
         first_name=payload.first_name,
         last_name=payload.last_name,
