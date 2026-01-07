@@ -209,69 +209,59 @@ class CheckoutRequest(BaseModel):
 
 
 
-import base64 # Make sure this is at the very top of main.py
-
 @app.post("/webhook/polar")
 async def polar_webhook(request: Request):
+    # 1. Capture RAW body
     payload = await request.body()
-    secret = os.environ.get("POLAR_WEBHOOK_SECRET")
     header = request.headers.get("webhook-signature")
+    secret = os.environ.get("POLAR_WEBHOOK_SECRET")
 
     if not header or not secret:
-        raise HTTPException(status_code=401)
+        return JSONResponse(status_code=401, content={"detail": "Missing signature or secret"})
 
     try:
-        # 1. Signature Verification (Encoding Match)
-        actual_sig_received = header.split(",")[-1] 
-        hmac_obj = hmac.new(
+        # 2. Polar uses Hex signatures. We must match that exactly.
+        # We strip "v1=" if it exists in the header
+        clean_signature = header.split("v1=")[-1]
+        
+        computed_hash = hmac.new(
             secret.encode('utf-8'),
             payload,
             hashlib.sha256
-        ).digest()
-        expected_sig_base64 = base64.b64encode(hmac_obj).decode('utf-8')
+        ).hexdigest() # MUST be hexdigest()
 
-        if not hmac.compare_digest(expected_sig_base64, actual_sig_received):
-            print(f"SIGNATURE MISMATCH: Received {actual_sig_received[:10]}...")
-            raise HTTPException(status_code=401)
+        if not hmac.compare_digest(computed_hash, clean_signature):
+            print(f"Auth Failed: Signature mismatch.")
+            return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
 
-        # 2. Database Update (Direct Session to avoid Auth errors)
+        # 3. Success! Now find the email in your specific payload
         data = json.loads(payload)
-        if data.get("type") == "order.created":
-            event_data = data.get("data", {})
-            customer_email = (
-                event_data.get("customer_email") or 
-                event_data.get("customer", {}).get("email") or
-                event_data.get("metadata", {}).get("email")
-            )
+        event_data = data.get("data", {})
+        
+        # We check all 3 places Polar hides the email
+        customer_email = (
+            event_data.get("customer", {}).get("email") or 
+            event_data.get("metadata", {}).get("email") or
+            event_data.get("customer_email")
+        )
 
-            if customer_email:
-                db = SessionLocal()
-                try:
-                    # Query User table directly to bypass auth/dependency logic
-                    user = db.query(User).filter(User.email == customer_email).first()
-                    if user:
-                        user.is_active = True
-                        db.commit()
-                        print(f"SUCCESS: {customer_email} is now ACTIVE in DB.")
-                    else:
-                        print(f"DB ERROR: User {customer_email} not found.")
-                except Exception as db_e:
-                    print(f"DATABASE ERROR: {db_e}")
-                    db.rollback()
-                finally:
-                    db.close()
-            
+        if customer_email:
+            db = SessionLocal()
+            try:
+                # Use your existing db.py function
+                user = activate_user_subscription(db, customer_email)
+                if user:
+                    print(f"SET ACTIVE: {customer_email}")
+                else:
+                    print(f"NOT FOUND: {customer_email}")
+            finally:
+                db.close()
+        
         return {"status": "success"}
 
     except Exception as e:
-        # If the error is already a 401 from hmac.compare_digest, re-raise it
-        if isinstance(e, HTTPException):
-            raise e
-        print(f"WEBHOOK PROCESSING ERROR: {e}")
-        return {"status": "error"}
-    
-    
-    
+        print(f"CRASH: {str(e)}")
+        return JSONResponse(status_code=400, content={"detail": "Processing error"})
 
 @app.get("/api/auth/status")
 async def get_subscription_status(
