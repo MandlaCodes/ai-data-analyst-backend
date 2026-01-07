@@ -212,27 +212,38 @@ class CheckoutRequest(BaseModel):
 async def polar_webhook(request: Request):
     payload = await request.body()
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
-    headers = dict(request.headers)
+    signature = request.headers.get("webhook-signature")
 
-    if not secret:
-        print("WEBHOOK ERROR: POLAR_WEBHOOK_SECRET not set in Render")
-        raise HTTPException(status_code=500)
+    if not signature or not secret:
+        print("WEBHOOK ERROR: Missing signature or secret")
+        raise HTTPException(status_code=401)
 
-    # 1. Official Signature Verification
-    try:
-        wh = Webhook(secret)
-        wh.verify(payload, headers)
-    except Exception as e:
-        print(f"WEBHOOK SIGNATURE VERIFICATION FAILED: {e}")
-        raise HTTPException(status_code=401, detail="Invalid signature")
+    # 1. Verification Logic
+    # Polar's signature is a hex hmac-sha256 of the payload using the secret
+    expected_sig = hmac.new(
+        secret.encode('utf-8'),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
 
-    # 2. Process Database Update
+    # Some versions of the signature include 'v1,' prefix. We check for both.
+    actual_sig = signature.replace("v1,", "")
+
+    if not hmac.compare_digest(expected_sig, actual_sig):
+        print(f"SIGNATURE MISMATCH: Received {actual_sig[:10]}... Expected {expected_sig[:10]}...")
+        raise HTTPException(status_code=401)
+
+    # 2. Database Update
     try:
         data = json.loads(payload)
         if data.get("type") == "order.created":
             event_data = data.get("data", {})
-            # Look for email in the nested customer object
-            customer_email = event_data.get("customer_email") or event_data.get("customer", {}).get("email")
+            # Look for email in multiple possible locations in the JSON
+            customer_email = (
+                event_data.get("customer_email") or 
+                event_data.get("customer", {}).get("email") or
+                event_data.get("metadata", {}).get("email")
+            )
             sub_id = event_data.get("subscription_id")
 
             if customer_email:
@@ -240,7 +251,7 @@ async def polar_webhook(request: Request):
                 try:
                     user = activate_user_subscription(db, customer_email, sub_id)
                     if user:
-                        print(f"VOILA! {customer_email} is now ACTIVE in the DB.")
+                        print(f"VOILA! {customer_email} is now ACTIVE in DB.")
                     else:
                         print(f"DB ERROR: User {customer_email} not found.")
                 finally:
