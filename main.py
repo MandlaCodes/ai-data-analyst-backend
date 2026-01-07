@@ -9,7 +9,8 @@ import os
 import json
 from fastapi import Request, HTTPException, Header, Depends
 from sqlalchemy.orm import Session
-from db import get_db, activate_user_subscription
+# Change this line:
+from db import SessionLocal, activate_user_subscription
 from checkout import create_metria_checkout  # Import your logic engine
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List, Union, Any
