@@ -3,45 +3,49 @@ from polar_sdk import Polar
 from db import SessionLocal, get_user_by_email 
 
 def create_metria_checkout(customer_email: str) -> str:
+    """
+    Final fix for Polar SDK v0.28.1.
+    The 'custom' attribute is missing, so we use the direct checkouts create method.
+    """
     db = SessionLocal()
     try:
-        # 1. Check if user exists
+        # 1. Verify user exists
         user = get_user_by_email(db, customer_email)
         if not user:
-            print(f"ERROR: User {customer_email} not found in database.")
+            print(f"CHECKOUT ERROR: User {customer_email} not found.")
             return None
             
-        # 2. Check Env Vars
         token = os.environ.get("POLAR_ACCESS_TOKEN")
         product_id = os.environ.get("POLAR_PRODUCT_ID")
 
-        if not token:
-            print("ERROR: POLAR_ACCESS_TOKEN is missing in Render.")
-            return None
-        if not product_id:
-            print("ERROR: POLAR_PRODUCT_ID is missing in Render.")
+        if not token or not product_id:
+            print("CHECKOUT ERROR: Missing Environment Variables.")
             return None
 
-        # 3. Call Polar API
+        # 2. Initialize Polar
         polar = Polar(access_token=token)
         
-        # v0.28.1 Syntax
-        res = polar.checkouts.custom.create(
+        # 3. Create checkout
+        # In v0.28.1, the path is polar.checkouts.create (removing .custom)
+        res = polar.checkouts.create(
             product_id=product_id,
             success_url="https://metria.dev/dashboard?payment=success",
             customer_email=customer_email,
-            metadata={"user_id": str(user.id)}
+            metadata={
+                "user_id": str(user.id),
+                "email": customer_email
+            }
         )
         
         if res and hasattr(res, 'url'):
-            print(f"SUCCESS: Link generated: {res.url}")
+            print(f"CHECKOUT SUCCESS: {res.url}")
             return res.url
         
-        print("ERROR: Polar API returned success but no URL.")
         return None
 
     except Exception as e:
-        print(f"CRITICAL SDK ERROR: {str(e)}")
+        # This will now catch if 'create' is also in a different spot
+        print(f"SDK ERROR DETAIL: {str(e)}")
         return None
     finally:
         db.close()
