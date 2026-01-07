@@ -219,34 +219,34 @@ import hashlib
 import os
 import json
 from fastapi import Request, HTTPException, Header
-# We import exactly what exists in your db.py
-from db import SessionLocal, activate_user_subscription
+# We only import what we know exists in your db.py
+from db import SessionLocal, activate_user_subscription 
 
 @app.post("/webhook/polar")
 async def polar_webhook(request: Request):
-    # 1. Capture raw body and the secret you added to Render
+    # 1. Capture the raw body and your secret
     payload = await request.body()
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
-
-    # Polar sends the signature in 'webhook-signature'
+    
+    # Polar sends the signature in this header
     signature = request.headers.get("webhook-signature")
 
     if not signature or not secret:
-        print(f"WEBHOOK 401: Signature present: {bool(signature)}, Secret present: {bool(secret)}")
-        raise HTTPException(status_code=401, detail="Missing configuration")
+        print(f"WEBHOOK 401: Missing Sig: {bool(signature)}, Secret: {bool(secret)}")
+        raise HTTPException(status_code=401)
 
-    # 2. Manual HMAC Verification (No SDK required)
+    # 2. Manual Verification (Bypasses the broken SDK 'validate' method)
     expected_sig = hmac.new(
-        secret.encode(),
-        payload,
+        secret.encode(), 
+        payload, 
         hashlib.sha256
     ).hexdigest()
 
     if not hmac.compare_digest(expected_sig, signature):
-        print("WEBHOOK 401: Signature Mismatch. Verify your POLAR_WEBHOOK_SECRET.")
-        raise HTTPException(status_code=401, detail="Invalid signature")
+        print("WEBHOOK 401: Signature Mismatch.")
+        raise HTTPException(status_code=401)
 
-    # 3. Process Success
+    # 3. Success - Update the Database
     try:
         event = json.loads(payload)
         if event.get("type") == "order.created":
@@ -254,28 +254,22 @@ async def polar_webhook(request: Request):
             customer_email = event_data.get("customer_email")
             subscription_id = event_data.get("subscription_id")
 
-            # Open a fresh session using your working SessionLocal
+            # Create a session directly from your SessionLocal
             db = SessionLocal()
             try:
-                activated_user = activate_user_subscription(db, customer_email, subscription_id)
-                if activated_user:
-                    print(f"SUCCESS: {customer_email} is now ACTIVE.")
+                user = activate_user_subscription(db, customer_email, subscription_id)
+                if user:
+                    print(f"VOILA! {customer_email} is now ACTIVE.")
                 else:
-                    print(f"DB ERROR: Could not find user with email {customer_email}")
+                    print(f"DB ERROR: User {customer_email} not found.")
             finally:
-                db.close() # Always close the connection
-
+                db.close()
+            
         return {"status": "success"}
 
     except Exception as e:
-        print(f"WEBHOOK PROCESSING ERROR: {str(e)}")
-        # We return 200 so Polar doesn't keep retrying a malformed JSON
-        return {"status": "error", "message": str(e)}
-
-    except Exception as e:
-        print(f"PROCESSING ERROR: {str(e)}")
-        # We return 200 here so Polar stops retrying if the signature was valid but our DB logic failed
-        return {"status": "error", "message": str(e)}
+        print(f"WEBHOOK ERROR: {str(e)}")
+        return {"status": "error"}
 
 @app.get("/api/auth/status")
 async def get_subscription_status(
@@ -305,11 +299,11 @@ async def generate_checkout_link(payload: CheckoutRequest):
 def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
-
+    
     # is_active will default to False here
     user = create_user_db(
         db,
-        email=payload.email,
+        email=payload.email, 
         password=payload.password,
         first_name=payload.first_name,
         last_name=payload.last_name,
