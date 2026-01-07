@@ -41,7 +41,6 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 API_TITLE = "Metria Neural Engine API" 
-
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI")
@@ -206,43 +205,48 @@ class ProfileUpdateRequest(BaseModel):
 class CheckoutRequest(BaseModel):
     email: EmailStr
 
-# --- REFINED POLAR WEBHOOK ---
 @app.post("/webhook/polar")
 async def polar_webhook(
     request: Request, 
     db: Session = Depends(get_db), 
-    x_polar_signature: str = Header(None)
+    # Use Header(None) but check for the common Polar names
+    webhook_signature: str = Header(None, alias="webhook-signature"),
+    x_polar_signature: str = Header(None, alias="x-polar-signature")
 ):
     payload = await request.body()
-    
-    if not x_polar_signature:
+
+    # Use whichever signature actually showed up
+    sig = webhook_signature or x_polar_signature
+
+    if not sig:
+        print("WEBHOOK ERROR: No signature header found in request")
         raise HTTPException(status_code=401, detail="Missing signature")
 
     try:
+        # Pass the verified signature and your secret
         event = polar.webhooks.validate(
             payload=payload,
-            signature=x_polar_signature,
-            secret=POLAR_WEBHOOK_SECRET
+            signature=sig,
+            secret=os.environ.get("POLAR_WEBHOOK_SECRET")
         )
-        
-        # ACTIVATE USER ON SUCCESSFUL ORDER
+
         if event["type"] == "order.created":
             customer_email = event["data"]["customer_email"]
             subscription_id = event["data"].get("subscription_id")
-            
-            # This logic now connects to db.py to actually set is_active = True
+
             activated_user = activate_user_subscription(db, customer_email, subscription_id)
-            
+
             if activated_user:
                 print(f"VOILA! {customer_email} is now ACTIVE.")
             else:
                 print(f"ERROR: Payment received for {customer_email} but user not found in DB.")
-            
+
         return {"status": "success"}
 
     except Exception as e:
         print(f"Webhook error: {e}")
-        raise HTTPException(status_code=400, detail="Invalid webhook")
+        # Return 401 for signature issues so Polar knows to retry
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
 @app.get("/api/auth/status")
 async def get_subscription_status(
