@@ -221,25 +221,20 @@ async def polar_webhook(request: Request):
         raise HTTPException(status_code=401)
 
     try:
-        # 1. Extract the signature part (stripping 'v1,' if it exists)
+        # 1. Signature Verification (Encoding Match)
         actual_sig_received = header.split(",")[-1] 
-
-        # 2. Generate the HMAC using .digest() (raw bytes) instead of .hexdigest()
         hmac_obj = hmac.new(
             secret.encode('utf-8'),
             payload,
             hashlib.sha256
         ).digest()
-
-        # 3. Encode our raw bytes to Base64 to match Polar
         expected_sig_base64 = base64.b64encode(hmac_obj).decode('utf-8')
 
-        # 4. Compare the two Base64 strings
         if not hmac.compare_digest(expected_sig_base64, actual_sig_received):
-            print(f"SIGNATURE MISMATCH: Received {actual_sig_received[:10]}... Expected {expected_sig_base64[:10]}...")
+            print(f"SIGNATURE MISMATCH: Received {actual_sig_received[:10]}...")
             raise HTTPException(status_code=401)
 
-        # 5. Database Update (Signature Verified!)
+        # 2. Database Update (Direct Session to avoid Auth errors)
         data = json.loads(payload)
         if data.get("type") == "order.created":
             event_data = data.get("data", {})
@@ -248,22 +243,30 @@ async def polar_webhook(request: Request):
                 event_data.get("customer", {}).get("email") or
                 event_data.get("metadata", {}).get("email")
             )
-            sub_id = event_data.get("subscription_id")
 
             if customer_email:
                 db = SessionLocal()
                 try:
-                    user = activate_user_subscription(db, customer_email, sub_id)
+                    # Query User table directly to bypass auth/dependency logic
+                    user = db.query(User).filter(User.email == customer_email).first()
                     if user:
-                        print(f"VOILA! {customer_email} is now ACTIVE.")
+                        user.is_active = True
+                        db.commit()
+                        print(f"SUCCESS: {customer_email} is now ACTIVE in DB.")
                     else:
                         print(f"DB ERROR: User {customer_email} not found.")
+                except Exception as db_e:
+                    print(f"DATABASE ERROR: {db_e}")
+                    db.rollback()
                 finally:
                     db.close()
             
         return {"status": "success"}
 
     except Exception as e:
+        # If the error is already a 401 from hmac.compare_digest, re-raise it
+        if isinstance(e, HTTPException):
+            raise e
         print(f"WEBHOOK PROCESSING ERROR: {e}")
         return {"status": "error"}
     
