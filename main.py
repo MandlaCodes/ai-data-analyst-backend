@@ -213,29 +213,24 @@ class CheckoutRequest(BaseModel):
     email: EmailStr
 
 
-
 import hmac
 import hashlib
 import os
 import json
-from fastapi import Request, HTTPException, Header
-# We only import what we know exists in your db.py
+from fastapi import Request, HTTPException
+# These two exist in your db.py, so the import will work perfectly
 from db import SessionLocal, activate_user_subscription 
 
 @app.post("/webhook/polar")
 async def polar_webhook(request: Request):
-    # 1. Capture the raw body and your secret
     payload = await request.body()
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
-    
-    # Polar sends the signature in this header
     signature = request.headers.get("webhook-signature")
 
+    # 1. Verification (Manual HMAC - No SDK needed)
     if not signature or not secret:
-        print(f"WEBHOOK 401: Missing Sig: {bool(signature)}, Secret: {bool(secret)}")
         raise HTTPException(status_code=401)
 
-    # 2. Manual Verification (Bypasses the broken SDK 'validate' method)
     expected_sig = hmac.new(
         secret.encode(), 
         payload, 
@@ -243,32 +238,31 @@ async def polar_webhook(request: Request):
     ).hexdigest()
 
     if not hmac.compare_digest(expected_sig, signature):
-        print("WEBHOOK 401: Signature Mismatch.")
+        print("WEBHOOK ERROR: Signature Mismatch")
         raise HTTPException(status_code=401)
 
-    # 3. Success - Update the Database
+    # 2. Database Update
     try:
-        event = json.loads(payload)
-        if event.get("type") == "order.created":
-            event_data = event.get("data", {})
-            customer_email = event_data.get("customer_email")
-            subscription_id = event_data.get("subscription_id")
+        data = json.loads(payload)
+        if data.get("type") == "order.created":
+            customer_email = data["data"]["customer_email"]
+            sub_id = data["data"].get("subscription_id")
 
-            # Create a session directly from your SessionLocal
+            # We use SessionLocal() directly because it's in your db.py
             db = SessionLocal()
             try:
-                user = activate_user_subscription(db, customer_email, subscription_id)
+                user = activate_user_subscription(db, customer_email, sub_id)
                 if user:
-                    print(f"VOILA! {customer_email} is now ACTIVE.")
+                    print(f"SUCCESS: {customer_email} activated in DB.")
                 else:
-                    print(f"DB ERROR: User {customer_email} not found.")
+                    print(f"NOT FOUND: User {customer_email} doesn't exist.")
             finally:
                 db.close()
             
         return {"status": "success"}
 
     except Exception as e:
-        print(f"WEBHOOK ERROR: {str(e)}")
+        print(f"WEBHOOK PROCESSING ERROR: {e}")
         return {"status": "error"}
 
 @app.get("/api/auth/status")
