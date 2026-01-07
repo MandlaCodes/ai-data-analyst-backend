@@ -6,7 +6,7 @@ import httpx
 import uuid
 import hmac
 import hashlib
-import base64  
+import base64 
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List, Union, Any
 from urllib.parse import urlencode 
@@ -209,7 +209,7 @@ class CheckoutRequest(BaseModel):
 
 
 
-
+import base64 # Make sure this is at the very top of main.py
 
 @app.post("/webhook/polar")
 async def polar_webhook(request: Request):
@@ -220,26 +220,26 @@ async def polar_webhook(request: Request):
     if not header or not secret:
         raise HTTPException(status_code=401)
 
-    # 1. Clean the incoming signature (Remove 'v1,' if present)
-    actual_sig_b64 = header.split(",")[-1] 
-
-    # 2. Generate the HMAC (This creates raw bytes)
-    hmac_obj = hmac.new(
-        secret.encode('utf-8'),
-        payload,
-        hashlib.sha256
-    ).digest()
-
-    # 3. Convert our raw bytes to Base64 to match Polar's format
-    expected_sig_b64 = base64.b64encode(hmac_obj).decode('utf-8')
-
-    # 4. Compare the two Base64 strings
-    if not hmac.compare_digest(expected_sig_b64, actual_sig_b64):
-        print(f"SIGNATURE MISMATCH: Received {actual_sig_b64[:10]}... Expected {expected_sig_b64[:10]}...")
-        raise HTTPException(status_code=401)
-
-    # --- REST OF YOUR DATABASE LOGIC ---
     try:
+        # 1. Extract the signature part (stripping 'v1,' if it exists)
+        actual_sig_received = header.split(",")[-1] 
+
+        # 2. Generate the HMAC using .digest() (raw bytes) instead of .hexdigest()
+        hmac_obj = hmac.new(
+            secret.encode('utf-8'),
+            payload,
+            hashlib.sha256
+        ).digest()
+
+        # 3. Encode our raw bytes to Base64 to match Polar
+        expected_sig_base64 = base64.b64encode(hmac_obj).decode('utf-8')
+
+        # 4. Compare the two Base64 strings
+        if not hmac.compare_digest(expected_sig_base64, actual_sig_received):
+            print(f"SIGNATURE MISMATCH: Received {actual_sig_received[:10]}... Expected {expected_sig_base64[:10]}...")
+            raise HTTPException(status_code=401)
+
+        # 5. Database Update (Signature Verified!)
         data = json.loads(payload)
         if data.get("type") == "order.created":
             event_data = data.get("data", {})
@@ -262,9 +262,13 @@ async def polar_webhook(request: Request):
                     db.close()
             
         return {"status": "success"}
+
     except Exception as e:
         print(f"WEBHOOK PROCESSING ERROR: {e}")
         return {"status": "error"}
+    
+    
+    
 
 @app.get("/api/auth/status")
 async def get_subscription_status(
