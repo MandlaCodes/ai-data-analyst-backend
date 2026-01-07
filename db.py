@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Mapped,
 import uuid 
 
 # --- Configuration ---
-# Hardcoded Production URL with SQLAlchemy 2.0 fix (postgres -> postgresql)
+# Hardcoded Production URL for app1_db_njfw
 DATABASE_URL = "postgresql://app1_db_njfw_user:78dlubKbwFhisDuvu17UjbBs4npC4dZC@dpg-d4pcq50gjchc73ao5ac0-a/app1_db_njfw"
 
 pwd_context = CryptContext(
@@ -19,8 +19,7 @@ pwd_context = CryptContext(
 # --- SQLAlchemy Setup ---
 engine = create_engine(
     DATABASE_URL, 
-    pool_pre_ping=True, # Keeps production connection alive
-    echo=False
+    pool_pre_ping=True
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -40,9 +39,8 @@ class User(Base):
     organization: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     industry: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
-    # Subscription tracking
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
-    subscription_id: Mapped[Optional[str]] = mapped_column(String, nullable=True) 
+    subscription_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -52,7 +50,6 @@ class User(Base):
     tokens = relationship("Token", back_populates="user", cascade="all, delete-orphan")
     state_tokens = relationship("StateToken", back_populates="user", cascade="all, delete-orphan")
 
-# ... (Rest of your AuditLog, Dashboard, Settings, Token, StateToken models stay exactly the same) ...
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
@@ -102,24 +99,88 @@ class StateToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc) + timedelta(minutes=10)) 
     user = relationship("User", back_populates="state_tokens")
 
-# --- Helper Functions (Keep your existing helpers here) ---
+
+# --- Helper Functions ---
+
 def create_user_db(db: Session, email: str, password: str, **kwargs) -> User:
     hashed_password = pwd_context.hash(password)
     db_user = User(email=email, hashed_password=hashed_password, **kwargs)
     db.add(db_user)
-    db.commit() # Added commit to ensure user is saved before checkout
+    db.commit()
     db.refresh(db_user)
     return db_user
 
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
 
+def get_user_profile_db(db: Session, user_id: int) -> Optional[User]:
+    return db.query(User).filter(User.id == user_id).first()
+
+def create_audit_log(db: Session, user_id: int, event_type: str, ip_address: Optional[str] = None):
+    db_log = AuditLog(user_id=user_id, event_type=event_type, ip_address=ip_address)
+    db.add(db_log)
+    db.commit()
+
+def save_google_token(db: Session, user_id: int, token_data: dict):
+    service = 'google_sheets'
+    existing_token = db.query(Token).filter(Token.user_id == user_id, Token.service == service).first()
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=token_data['expires_in']) if token_data.get('expires_in') else None
+    if existing_token:
+        existing_token.access_token = token_data['access_token']
+        if token_data.get('refresh_token'):
+            existing_token.refresh_token = token_data['refresh_token']
+        existing_token.expires_at = expires_at
+        existing_token.created_at = now
+    else:
+        new_token = Token(user_id=user_id, service=service, access_token=token_data['access_token'], refresh_token=token_data.get('refresh_token'), expires_at=expires_at)
+        db.add(new_token)
+    db.commit()
+
+def get_user_id_from_state_db(db: Session, state_uuid: str) -> Optional[dict]:
+    state_record = db.query(StateToken).filter(StateToken.state_uuid == state_uuid).first()
+    if not state_record: return None
+    expiry = state_record.expires_at
+    if expiry.tzinfo is None: expiry = expiry.replace(tzinfo=timezone.utc)
+    if expiry < datetime.now(timezone.utc):
+        db.delete(state_record)
+        db.commit() 
+        return None
+    return {"user_id": state_record.user_id, "return_path": state_record.return_path}
+
+def delete_state_from_db(db: Session, state_uuid: str):
+    db.query(StateToken).filter(StateToken.state_uuid == state_uuid).delete()
+    db.commit()
+
+def verify_password_helper(plain_password: str, hashed_password: str) -> bool:
+    try: return pwd_context.verify(plain_password, hashed_password)
+    except: return False
+
+def get_google_token(db: Session, user_id: int) -> Optional[Token]:
+    return db.query(Token).filter(Token.user_id == user_id, Token.service == 'google_sheets').first()
+
+def save_state_to_db(db: Session, user_id: int, state_uuid: str, return_path: str):
+    db.add(StateToken(state_uuid=state_uuid, user_id=user_id, return_path=return_path))
+    db.commit()
+
+def get_latest_dashboard_db(db: Session, user_id: int) -> Optional[Dashboard]:
+    return db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
+
+def get_user_settings_db(db: Session, user_id: int) -> Optional[Settings]:
+    return db.query(Settings).filter(Settings.user_id == user_id).first()
+
+def get_audit_logs_db(db: Session, user_id: int, limit: int = 10) -> List[AuditLog]:
+    return db.query(AuditLog).filter(AuditLog.user_id == user_id).order_by(AuditLog.timestamp.desc()).limit(limit).all()
+
+def get_tokens_metadata_db(db: Session, user_id: int) -> List[Token]:
+    return db.query(Token).filter(Token.user_id == user_id).all()
+
 def activate_user_subscription(db: Session, email: str, subscription_id: Optional[str] = None):
     user = db.query(User).filter(User.email == email).first()
     if user:
         user.is_active = True
-        if subscription_id:
-            user.subscription_id = subscription_id
+        if subscription_id: user.subscription_id = subscription_id
+        create_audit_log(db, user_id=user.id, event_type="SUBSCRIPTION_ACTIVATED")
         db.commit()
         return user
     return None
