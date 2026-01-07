@@ -6,6 +6,7 @@ import httpx
 import uuid
 import hmac
 import hashlib
+import base64  
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List, Union, Any
 from urllib.parse import urlencode 
@@ -208,37 +209,40 @@ class CheckoutRequest(BaseModel):
 
 
 
+
+
 @app.post("/webhook/polar")
 async def polar_webhook(request: Request):
     payload = await request.body()
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
-    signature = request.headers.get("webhook-signature")
+    header = request.headers.get("webhook-signature")
 
-    if not signature or not secret:
-        print("WEBHOOK ERROR: Missing signature or secret")
+    if not header or not secret:
         raise HTTPException(status_code=401)
 
-    # 1. Verification Logic
-    # Polar's signature is a hex hmac-sha256 of the payload using the secret
-    expected_sig = hmac.new(
+    # 1. Clean the incoming signature (Remove 'v1,' if present)
+    actual_sig_b64 = header.split(",")[-1] 
+
+    # 2. Generate the HMAC (This creates raw bytes)
+    hmac_obj = hmac.new(
         secret.encode('utf-8'),
         payload,
         hashlib.sha256
-    ).hexdigest()
+    ).digest()
 
-    # Some versions of the signature include 'v1,' prefix. We check for both.
-    actual_sig = signature.replace("v1,", "")
+    # 3. Convert our raw bytes to Base64 to match Polar's format
+    expected_sig_b64 = base64.b64encode(hmac_obj).decode('utf-8')
 
-    if not hmac.compare_digest(expected_sig, actual_sig):
-        print(f"SIGNATURE MISMATCH: Received {actual_sig[:10]}... Expected {expected_sig[:10]}...")
+    # 4. Compare the two Base64 strings
+    if not hmac.compare_digest(expected_sig_b64, actual_sig_b64):
+        print(f"SIGNATURE MISMATCH: Received {actual_sig_b64[:10]}... Expected {expected_sig_b64[:10]}...")
         raise HTTPException(status_code=401)
 
-    # 2. Database Update
+    # --- REST OF YOUR DATABASE LOGIC ---
     try:
         data = json.loads(payload)
         if data.get("type") == "order.created":
             event_data = data.get("data", {})
-            # Look for email in multiple possible locations in the JSON
             customer_email = (
                 event_data.get("customer_email") or 
                 event_data.get("customer", {}).get("email") or
@@ -251,14 +255,13 @@ async def polar_webhook(request: Request):
                 try:
                     user = activate_user_subscription(db, customer_email, sub_id)
                     if user:
-                        print(f"VOILA! {customer_email} is now ACTIVE in DB.")
+                        print(f"VOILA! {customer_email} is now ACTIVE.")
                     else:
                         print(f"DB ERROR: User {customer_email} not found.")
                 finally:
                     db.close()
             
         return {"status": "success"}
-
     except Exception as e:
         print(f"WEBHOOK PROCESSING ERROR: {e}")
         return {"status": "error"}
