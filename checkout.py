@@ -3,38 +3,43 @@ from polar_sdk import Polar
 from db import SessionLocal, get_user_by_email 
 
 def create_metria_checkout(customer_email: str) -> str:
-    """
-    Generates a secure Polar checkout URL tied specifically to a registered user.
-    """
     db = SessionLocal()
     try:
-        # 1. Validation
+        # 1. Verify user exists in the NEW production DB
         user = get_user_by_email(db, customer_email)
         if not user:
-            print(f"Checkout block: {customer_email} attempted payment without account.")
+            print(f"CHECKOUT ERROR: User {customer_email} not found in PostgreSQL.")
             return None
             
-        # 2. Polar Logic: Initialize client directly (No 'with' statement)
-        polar = Polar(access_token=os.environ.get("POLAR_ACCESS_TOKEN"))
+        token = os.environ.get("POLAR_ACCESS_TOKEN")
+        product_id = os.environ.get("POLAR_PRODUCT_ID")
+
+        # 2. Safety check for Environment Variables
+        if not token or not product_id:
+            print("CHECKOUT ERROR: POLAR_ACCESS_TOKEN or POLAR_PRODUCT_ID is missing in Render Env.")
+            return None
+
+        # 3. Initialize Polar Client (NO 'with' statement - this was the crash)
+        polar = Polar(access_token=token)
         
-        # 3. Use the .custom.create method which is standard for single product checkouts
-        # Note: product_id is a string, not a list.
+        # 4. Create the checkout session
+        # Use 'custom' create for specific product IDs
         res = polar.checkouts.custom.create(
-            product_id=os.environ.get("POLAR_PRODUCT_ID"),
-            success_url=os.environ.get("POLAR_SUCCESS_URL"),
+            product_id=product_id,
+            success_url="https://metria.dev/dashboard?payment=success",
             customer_email=customer_email,
-            # metadata allows us to track the user_id in the webhook later
             metadata={
                 "user_id": str(user.id),
-                "context": "neural_engine_activation"
+                "email": customer_email
             }
         )
         
-        print(f"Checkout generated for User ID: {user.id}")
+        print(f"CHECKOUT SUCCESS: Generated URL for {customer_email}")
         return res.url
 
     except Exception as e:
-        print(f"Critical error in Checkout Engine: {e}")
+        # This will show the EXACT error from Polar in your Render Logs
+        print(f"CRITICAL POLAR SDK ERROR: {str(e)}")
         return None
     finally:
         db.close()
