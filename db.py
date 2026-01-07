@@ -39,7 +39,10 @@ class User(Base):
     organization: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     industry: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Subscription tracking for Checkout Logic
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)  # New users must pay to activate
+    subscription_id: Mapped[Optional[str]] = mapped_column(String, nullable=True) # Polar/Stripe ID
+    
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     dashboards = relationship("Dashboard", back_populates="user", cascade="all, delete-orphan")
@@ -123,7 +126,6 @@ def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
 
 def get_user_profile_db(db: Session, user_id: int) -> Optional[User]:
-    # Optimization: get() is faster for PK lookups
     return db.query(User).filter(User.id == user_id).first()
 
 def create_audit_log(db: Session, user_id: int, event_type: str, ip_address: Optional[str] = None):
@@ -158,7 +160,6 @@ def get_user_id_from_state_db(db: Session, state_uuid: str) -> Optional[dict]:
     if not state_record:
         return None
     
-    # Critical Fix: Ensure comparison is timezone aware
     expiry = state_record.expires_at
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
@@ -199,3 +200,16 @@ def get_audit_logs_db(db: Session, user_id: int, limit: int = 10) -> List[AuditL
 
 def get_tokens_metadata_db(db: Session, user_id: int) -> List[Token]:
     return db.query(Token).filter(Token.user_id == user_id).all()
+
+# --- REFINED SUBSCRIPTION ACTIVATION ---
+def activate_user_subscription(db: Session, email: str, subscription_id: Optional[str] = None):
+    user = db.query(User).filter(User.email == email).first()
+    if user:
+        user.is_active = True
+        if subscription_id:
+            user.subscription_id = subscription_id
+            
+        create_audit_log(db, user_id=user.id, event_type="SUBSCRIPTION_ACTIVATED")
+        db.commit()
+        return user
+    return None
