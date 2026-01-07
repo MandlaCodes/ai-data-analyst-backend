@@ -211,57 +211,57 @@ class CheckoutRequest(BaseModel):
 
 @app.post("/webhook/polar")
 async def polar_webhook(request: Request):
-    # 1. Capture RAW body
-    payload = await request.body()
-    header = request.headers.get("webhook-signature")
+    # 1. Get the Raw Body and the Signature Header
+    # IMPORTANT: We must use the raw body for the HMAC to match
+    raw_payload = await request.body()
+    signature = request.headers.get("webhook-signature")
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
 
-    if not header or not secret:
+    if not signature or not secret:
         return JSONResponse(status_code=401, content={"detail": "Missing signature or secret"})
 
+    # 2. Polar's current signature format is: v1=hex_hash
+    # We need to extract just the hash part
     try:
-        # 2. Polar uses Hex signatures. We must match that exactly.
-        # We strip "v1=" if it exists in the header
-        clean_signature = header.split("v1=")[-1]
-        
+        if "v1=" in signature:
+            signature = signature.split("v1=")[1]
+            
+        # 3. Calculate the HMAC-SHA256 HEX DIGEST
         computed_hash = hmac.new(
             secret.encode('utf-8'),
-            payload,
+            raw_payload,
             hashlib.sha256
-        ).hexdigest() # MUST be hexdigest()
+        ).hexdigest()
 
-        if not hmac.compare_digest(computed_hash, clean_signature):
-            print(f"Auth Failed: Signature mismatch.")
+        # 4. Secure Comparison
+        if not hmac.compare_digest(computed_hash, signature):
+            # This print will help you see the difference in your Render logs
+            print(f"SIGNATURE ERROR | Computed: {computed_hash[:8]} | Header: {signature[:8]}")
             return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
 
-        # 3. Success! Now find the email in your specific payload
-        data = json.loads(payload)
+        # 5. Signature Passed! Now process the data
+        data = json.loads(raw_payload)
         event_data = data.get("data", {})
         
-        # We check all 3 places Polar hides the email
-        customer_email = (
-            event_data.get("customer", {}).get("email") or 
-            event_data.get("metadata", {}).get("email") or
-            event_data.get("customer_email")
-        )
+        # In your logs, the email is in data -> metadata -> email
+        customer_email = event_data.get("metadata", {}).get("email") or \
+                         event_data.get("customer", {}).get("email")
 
         if customer_email:
             db = SessionLocal()
             try:
-                # Use your existing db.py function
+                # Use your existing db.py helper to activate the user
                 user = activate_user_subscription(db, customer_email)
                 if user:
-                    print(f"SET ACTIVE: {customer_email}")
-                else:
-                    print(f"NOT FOUND: {customer_email}")
+                    print(f"WEBHOOK SUCCESS: User {customer_email} is now Active.")
             finally:
                 db.close()
 
         return {"status": "success"}
 
     except Exception as e:
-        print(f"CRASH: {str(e)}")
-        return JSONResponse(status_code=400, content={"detail": "Processing error"})
+        print(f"WEBHOOK EXCEPTION: {str(e)}")
+        return JSONResponse(status_code=400, content={"detail": str(e)})
 
 @app.get("/api/auth/status")
 async def get_subscription_status(
