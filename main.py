@@ -256,7 +256,7 @@ async def polar_webhook(request: Request):
                     print(f"NOT FOUND: {customer_email}")
             finally:
                 db.close()
-        
+
         return {"status": "success"}
 
     except Exception as e:
