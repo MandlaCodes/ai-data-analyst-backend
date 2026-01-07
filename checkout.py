@@ -5,7 +5,7 @@ from db import SessionLocal, get_user_by_email
 def create_metria_checkout(customer_email: str) -> str:
     """
     Generates a Polar Checkout URL for the 'Hire Your AI Analyst' flow.
-    Fixed for Polar SDK v1.x+ (using products list instead of product_id).
+    Updated for Polar SDK v1.1.0+ (using request object structure).
     """
     db = SessionLocal()
     try:
@@ -24,22 +24,24 @@ def create_metria_checkout(customer_email: str) -> str:
             return None
 
         # 3. Initialize Polar Client
-        # The 'with' statement is removed as it's not supported in current versions
         polar = Polar(access_token=token)
         
         # 4. Create the checkout session
-        # CRITICAL FIX: The SDK now requires 'products=[product_id]' instead of 'product_id=product_id'
+        # CRITICAL FIX: SDK v1.1.0+ expects a 'request' argument with the data
         res = polar.checkouts.custom.create(
-            products=[product_id], 
-            success_url="https://metria.dev/dashboard?payment=success",
-            customer_email=customer_email,
-            metadata={
-                "user_id": str(user.id),
-                "email": customer_email
+            request={
+                "products": [product_id],
+                "success_url": "https://metria.dev/dashboard?payment=success",
+                "customer_email": customer_email,
+                "metadata": {
+                    "user_id": str(user.id),
+                    "email": customer_email
+                }
             }
         )
         
-        if hasattr(res, 'url') and res.url:
+        # Accessing the URL from the response object
+        if res and hasattr(res, 'url'):
             print(f"CHECKOUT SUCCESS: URL generated for {customer_email}")
             return res.url
         
@@ -47,7 +49,7 @@ def create_metria_checkout(customer_email: str) -> str:
         return None
 
     except Exception as e:
-        # This will catch the 'unexpected keyword argument' error if the fix wasn't applied
+        # This catches the schema validation errors or API errors
         print(f"CRITICAL POLAR SDK ERROR: {str(e)}")
         return None
     finally:
