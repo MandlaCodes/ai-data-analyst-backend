@@ -348,26 +348,20 @@ def login(payload: UserLogin, db: DBSession, request: Request):
 
 # --- Updated Profile Routes ---
 
-@app.get("/auth/me", tags=["Auth"])
-def me(user: AuthUser, db: Session = Depends(get_db)):
-    db.refresh(user)
-    return { 
-        "user_id": user.id, 
+@app.get("/api/auth/me", tags=["Auth"])
+async def get_me(user: AuthUser, db: Session = Depends(get_db)):
+    # Force SQLAlchemy to pull the absolute latest data from the DB disk
+    db.refresh(user) 
+    
+    return {
+        "id": user.id,
         "email": user.email,
         "first_name": user.first_name,
         "last_name": user.last_name,
         "organization": user.organization,
         "industry": user.industry,
-        "is_active": user.is_active 
-    }
-
-@app.get("/api/auth/me", tags=["Auth"])
-def get_me_sync(user: AuthUser, db: Session = Depends(get_db)):
-    db.refresh(user)
-    return { 
-        "user_id": user.id, 
-        "email": user.email,
-        "is_active": user.is_active 
+        "is_active": user.is_active,
+        "subscription_id": user.subscription_id
     }
 
 @app.get("/api/auth/status")
@@ -382,18 +376,15 @@ async def get_subscription_status(
     }
 
 @app.put("/auth/profile/update", tags=["Auth"])
-def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSession):
-    user = get_user_profile_db(db, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
+def update_profile(payload: ProfileUpdateRequest, user: AuthUser, db: DBSession):
+    # 'user' is already fetched via AuthUser dependency
     user.first_name = payload.first_name
     user.last_name = payload.last_name
     user.organization = payload.organization
     user.industry = payload.industry
     
     db.commit()
-    db.refresh(user)
+    db.refresh(user) # Refresh here too so the frontend gets the new names immediately
     return user
 
 # -------------------- AI ANALYST ROUTES --------------------
