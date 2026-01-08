@@ -211,57 +211,59 @@ class CheckoutRequest(BaseModel):
 
 @app.post("/webhook/polar")
 async def polar_webhook(request: Request):
-    # 1. Get the Raw Body and the Signature Header
-    # IMPORTANT: We must use the raw body for the HMAC to match
+    # 1. Capture exact raw bytes
     raw_payload = await request.body()
-    signature = request.headers.get("webhook-signature")
+    # 2. Extract headers
+    signature_header = request.headers.get("webhook-signature", "")
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
 
-    if not signature or not secret:
-        return JSONResponse(status_code=401, content={"detail": "Missing signature or secret"})
+    if not secret:
+        print("CRITICAL: POLAR_WEBHOOK_SECRET is not set in Env Variables!")
+        return JSONResponse(status_code=500, content={"detail": "Secret not configured"})
 
-    # 2. Polar's current signature format is: v1=hex_hash
-    # We need to extract just the hash part
     try:
-        if "v1=" in signature:
-            signature = signature.split("v1=")[1]
-            
-        # 3. Calculate the HMAC-SHA256 HEX DIGEST
+        # 3. Polar sends "v1=hash". We need the hash.
+        received_hash = signature_header.split("v1=")[-1] if "v1=" in signature_header else signature_header
+        
+        # 4. Generate our comparison hash
         computed_hash = hmac.new(
             secret.encode('utf-8'),
             raw_payload,
             hashlib.sha256
         ).hexdigest()
 
-        # 4. Secure Comparison
-        if not hmac.compare_digest(computed_hash, signature):
-            # This print will help you see the difference in your Render logs
-            print(f"SIGNATURE ERROR | Computed: {computed_hash[:8]} | Header: {signature[:8]}")
+        # 5. DIAGNOSTIC LOGGING
+        # Check your Render logs for these lines!
+        print(f"--- WEBHOOK ATTEMPT ---")
+        print(f"Header Signature: {received_hash[:10]}...")
+        print(f"Computed Hash:   {computed_hash[:10]}...")
+        
+        if not hmac.compare_digest(computed_hash, received_hash):
+            print("RESULT: ❌ Signature Mismatch")
             return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
 
-        # 5. Signature Passed! Now process the data
+        print("RESULT: ✅ Signature Verified")
+
+        # 6. Activation Logic
         data = json.loads(raw_payload)
-        event_data = data.get("data", {})
-        
-        # In your logs, the email is in data -> metadata -> email
-        customer_email = event_data.get("metadata", {}).get("email") or \
-                         event_data.get("customer", {}).get("email")
+        # Use the specific path from the payload you shared
+        customer_email = data.get("data", {}).get("metadata", {}).get("email") or \
+                         data.get("data", {}).get("customer", {}).get("email")
 
         if customer_email:
             db = SessionLocal()
             try:
-                # Use your existing db.py helper to activate the user
                 user = activate_user_subscription(db, customer_email)
                 if user:
-                    print(f"WEBHOOK SUCCESS: User {customer_email} is now Active.")
+                    print(f"DATABASE: {customer_email} is now ACTIVE")
             finally:
                 db.close()
 
         return {"status": "success"}
 
     except Exception as e:
-        print(f"WEBHOOK EXCEPTION: {str(e)}")
-        return JSONResponse(status_code=400, content={"detail": str(e)})
+        print(f"SYSTEM ERROR: {str(e)}")
+        return JSONResponse(status_code=400, content={"detail": "Processing error"})
 
 @app.get("/api/auth/status")
 async def get_subscription_status(
