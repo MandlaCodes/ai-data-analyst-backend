@@ -56,8 +56,10 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI(title=API_TITLE)
 
 # -------------------- CORS Configuration --------------------
+# Ensure these do NOT have trailing slashes
 origins = [
-    FRONTEND_URL, 
+    "https://metria.dev",
+    "https://www.metria.dev",
     "http://localhost:3000",
     "http://localhost:5173",
 ]
@@ -66,11 +68,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins, 
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Be explicit about methods and headers to satisfy strict browser checks
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization", 
+        "Content-Type", 
+        "Cache-Control", 
+        "X-Requested-With",
+        "webhook-signature" # Added since your Polar hook uses this
+    ],
+    expose_headers=["*"] # Allows frontend to see all response headers
 )
-
-
 # Your Webhook Secret from the Polar Dashboard
 POLAR_WEBHOOK_SECRET = os.environ.get("POLAR_WEBHOOK_SECRET")
 
