@@ -218,7 +218,7 @@ async def polar_webhook(request: Request):
     if not secret:
         return JSONResponse(status_code=500, content={"detail": "Webhook secret not configured"})
 
-    # 1. Try Standard Verification
+    # 1. Verification logic
     received_hash = signature.split("v1=")[-1] if "v1=" in signature else signature
     computed_hash = hmac.new(
         secret.encode('utf-8'),
@@ -226,14 +226,25 @@ async def polar_webhook(request: Request):
         hashlib.sha256
     ).hexdigest()
 
-    # 2. Signature check
     if not hmac.compare_digest(computed_hash, received_hash):
         print(f"DEBUG: Signature mismatch, attempting manual override for recovery.")
     
     try:
+        # 2. Parse and LOG the data
         data = json.loads(raw_payload)
+        
+        # --- THE DEBUG LOGGER ---
+        # This will print the entire payload to your Render logs so we can see the structure
+        print("--- INCOMING POLAR WEBHOOK DATA ---")
+        print(json.dumps(data, indent=2)) 
+        print("-----------------------------------")
+        
         event_data = data.get("data", {})
         
+        # 3. Extract the Subscription ID
+        polar_sub_id = event_data.get("id") 
+        
+        # 4. Extract Customer Email
         customer_email = (
             event_data.get("metadata", {}).get("email") or 
             event_data.get("customer", {}).get("email")
@@ -242,18 +253,24 @@ async def polar_webhook(request: Request):
         if customer_email:
             db = SessionLocal()
             try:
-                user = activate_user_subscription(db, customer_email)
+                # 5. Activate in DB
+                user = activate_user_subscription(db, customer_email, subscription_id=polar_sub_id)
+                
                 if user:
-                    print(f"FORCE ACTIVE: {customer_email}")
-                return {"status": "success", "msg": "Override activated"}
+                    print(f"FORCE ACTIVE SUCCESS: {customer_email} (ID: {polar_sub_id})")
+                else:
+                    print(f"WEBHOOK ALERT: Email {customer_email} found in webhook but NO USER found in Database.")
+                
+                return {"status": "success", "msg": "Processing complete"}
             finally:
                 db.close()
         
+        print("WEBHOOK ALERT: No customer email found in payload.")
         return {"status": "success"}
-    except Exception as e:
-        print(f"WEBHOOK ERROR: {str(e)}")
-        return JSONResponse(status_code=400, content={"detail": "Error processing webhook"})
 
+    except Exception as e:
+        print(f"WEBHOOK CRITICAL ERROR: {str(e)}")
+        return JSONResponse(status_code=400, content={"detail": "Error processing webhook"})
 # -------------------- PAYMENT & ACTIVATION --------------------
 
 @app.post("/payments/create-checkout", tags=["Auth"])
