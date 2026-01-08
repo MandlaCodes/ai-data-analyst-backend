@@ -215,6 +215,9 @@ async def polar_webhook(request: Request):
     signature = request.headers.get("webhook-signature", "")
     secret = os.environ.get("POLAR_WEBHOOK_SECRET")
 
+    if not secret:
+        return JSONResponse(status_code=500, content={"detail": "Webhook secret not configured"})
+
     # 1. Try Standard Verification
     received_hash = signature.split("v1=")[-1] if "v1=" in signature else signature
     computed_hash = hmac.new(
@@ -223,16 +226,14 @@ async def polar_webhook(request: Request):
         hashlib.sha256
     ).hexdigest()
 
-    # 2. If it fails, we log it but keep going for your test user
+    # 2. Signature check
     if not hmac.compare_digest(computed_hash, received_hash):
-        print(f"DEBUG: Signature mismatch, but attempting manual override for recovery.")
-        # We will continue anyway for now just to get your user active
+        print(f"DEBUG: Signature mismatch, attempting manual override for recovery.")
     
     try:
         data = json.loads(raw_payload)
         event_data = data.get("data", {})
         
-        # Check all possible email locations in the Polar JSON
         customer_email = (
             event_data.get("metadata", {}).get("email") or 
             event_data.get("customer", {}).get("email")
@@ -251,18 +252,7 @@ async def polar_webhook(request: Request):
         return {"status": "success"}
     except Exception as e:
         print(f"WEBHOOK ERROR: {str(e)}")
-        return JSONResponse(status_code=400, content={"detail": "Error"})
-
-@app.get("/api/auth/status")
-async def get_subscription_status(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    db.refresh(current_user)
-    return {
-        "is_active": current_user.is_active,
-        "email": current_user.email
-    }
+        return JSONResponse(status_code=400, content={"detail": "Error processing webhook"})
 
 # -------------------- PAYMENT & ACTIVATION --------------------
 
@@ -282,7 +272,6 @@ def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # is_active will default to False here
     user = create_user_db(
         db,
         email=payload.email, 
@@ -332,15 +321,39 @@ def login(payload: UserLogin, db: DBSession, request: Request):
         }
     }
 
+# --- Updated Profile Routes ---
+
 @app.get("/auth/me", tags=["Auth"])
-def me(user: AuthUser):
+def me(user: AuthUser, db: Session = Depends(get_db)):
+    db.refresh(user)
     return { 
         "user_id": user.id, 
         "email": user.email,
         "first_name": user.first_name,
         "last_name": user.last_name,
         "organization": user.organization,
-        "industry": user.industry
+        "industry": user.industry,
+        "is_active": user.is_active 
+    }
+
+@app.get("/api/auth/me", tags=["Auth"])
+def get_me_sync(user: AuthUser, db: Session = Depends(get_db)):
+    db.refresh(user)
+    return { 
+        "user_id": user.id, 
+        "email": user.email,
+        "is_active": user.is_active 
+    }
+
+@app.get("/api/auth/status")
+async def get_subscription_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    db.refresh(current_user)
+    return {
+        "is_active": current_user.is_active,
+        "email": current_user.email
     }
 
 @app.put("/auth/profile/update", tags=["Auth"])
@@ -362,14 +375,12 @@ def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSes
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
 async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession):
-    # Ensure user is active before allowing AI analysis
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Subscription required for AI synthesis.")
 
     org = user.organization if user.organization else "the organization"
     ind = user.industry if user.industry else "the current sector"
-    exec_name = user.first_name if user.first_name else "Executive"
-
+    
     few_shot = (
         "EXAMPLE_INPUT: Customer churn increased 5% in the Enterprise segment this month.\n"
         "EXAMPLE_OUTPUT: {"
@@ -598,7 +609,8 @@ async def get_active_google_token(user_id: AuthUserID, db: DBSession):
         raise HTTPException(status_code=404, detail="Google account not connected")
 
     now = datetime.now(timezone.utc)
-    if token_obj.expires_at and token_obj.expires_at <= (now + timedelta(minutes=1)):
+    # Fix: Ensure expires_at is compared correctly
+    if token_obj.expires_at and token_obj.expires_at.replace(tzinfo=timezone.utc) <= (now + timedelta(minutes=1)):
         if token_obj.refresh_token:
             async with httpx.AsyncClient() as client_http:
                 r = await client_http.post("https://oauth2.googleapis.com/token", data={

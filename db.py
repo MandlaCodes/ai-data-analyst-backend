@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Mapped,
 import uuid 
 
 # --- Configuration ---
-# Hardcoded Production URL for app1_db_njfw
+# Using the production URL provided
 DATABASE_URL = "postgresql://app1_db_njfw_user:78dlubKbwFhisDuvu17UjbBs4npC4dZC@dpg-d4pcq50gjchc73ao5ac0-a/app1_db_njfw"
 
 pwd_context = CryptContext(
@@ -42,6 +42,7 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     subscription_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
+    # FIX: Ensure default uses timezone-aware UTC
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     dashboards = relationship("Dashboard", back_populates="user", cascade="all, delete-orphan")
@@ -140,8 +141,12 @@ def save_google_token(db: Session, user_id: int, token_data: dict):
 def get_user_id_from_state_db(db: Session, state_uuid: str) -> Optional[dict]:
     state_record = db.query(StateToken).filter(StateToken.state_uuid == state_uuid).first()
     if not state_record: return None
+    
+    # FIX: Safety check for timezone awareness to prevent comparison crashes
     expiry = state_record.expires_at
-    if expiry.tzinfo is None: expiry = expiry.replace(tzinfo=timezone.utc)
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+        
     if expiry < datetime.now(timezone.utc):
         db.delete(state_record)
         db.commit() 
@@ -153,8 +158,10 @@ def delete_state_from_db(db: Session, state_uuid: str):
     db.commit()
 
 def verify_password_helper(plain_password: str, hashed_password: str) -> bool:
-    try: return pwd_context.verify(plain_password, hashed_password)
-    except: return False
+    try: 
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception: 
+        return False
 
 def get_google_token(db: Session, user_id: int) -> Optional[Token]:
     return db.query(Token).filter(Token.user_id == user_id, Token.service == 'google_sheets').first()
@@ -179,8 +186,10 @@ def activate_user_subscription(db: Session, email: str, subscription_id: Optiona
     user = db.query(User).filter(User.email == email).first()
     if user:
         user.is_active = True
-        if subscription_id: user.subscription_id = subscription_id
+        if subscription_id: 
+            user.subscription_id = subscription_id
         create_audit_log(db, user_id=user.id, event_type="SUBSCRIPTION_ACTIVATED")
         db.commit()
+        db.refresh(user) # Ensure we return the updated state
         return user
     return None
