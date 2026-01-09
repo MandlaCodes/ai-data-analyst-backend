@@ -350,9 +350,11 @@ def login(payload: UserLogin, db: DBSession, request: Request):
 
 @app.get("/api/auth/me", tags=["Auth"])
 async def get_me(user: AuthUser, db: Session = Depends(get_db)):
-    # Force SQLAlchemy to pull the absolute latest data from the DB disk
+    # 1. Kill the cache for this specific user object
+    db.expire(user) 
+    # 2. Re-pull the fresh data (where is_active is now True)
     db.refresh(user) 
-    
+
     return {
         "id": user.id,
         "email": user.email,
@@ -360,7 +362,7 @@ async def get_me(user: AuthUser, db: Session = Depends(get_db)):
         "last_name": user.last_name,
         "organization": user.organization,
         "industry": user.industry,
-        "is_active": user.is_active,
+        "is_active": user.is_active, # This will now be True
         "subscription_id": user.subscription_id
     }
 
