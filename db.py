@@ -7,8 +7,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Mapped,
 import uuid 
 
 # --- Configuration ---
-# Using the production URL provided
-DATABASE_URL = "postgresql://app1_db_njfw_user:78dlubKbwFhisDuvu17UjbBs4npC4dZC@dpg-d4pcq50gjchc73ao5ac0-a/app1_db_njfw"
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./test.db") 
 
 pwd_context = CryptContext(
     schemes=["bcrypt"], 
@@ -19,7 +18,8 @@ pwd_context = CryptContext(
 # --- SQLAlchemy Setup ---
 engine = create_engine(
     DATABASE_URL, 
-    pool_pre_ping=True
+    pool_pre_ping=True, 
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {} 
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -39,10 +39,7 @@ class User(Base):
     organization: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     industry: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
-    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
-    subscription_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    
-    # FIX: Ensure default uses timezone-aware UTC
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     dashboards = relationship("Dashboard", back_populates="user", cascade="all, delete-orphan")
@@ -54,33 +51,40 @@ class User(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     event_type: Mapped[str] = mapped_column(String, index=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     ip_address: Mapped[str] = mapped_column(String, nullable=True)
+
     user = relationship("User", back_populates="audit_logs")
 
 class Dashboard(Base):
     __tablename__ = "dashboards"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     name: Mapped[str] = mapped_column(String)
     layout_data: Mapped[str] = mapped_column(Text) 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_accessed: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
     user = relationship("User", back_populates="dashboards")
 
 class Settings(Base):
     __tablename__ = "settings"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
     theme: Mapped[str] = mapped_column(String, default="light")
     data_source_config: Mapped[str] = mapped_column(Text, default="{}")
+
     user = relationship("User", back_populates="settings")
 
 class Token(Base):
     __tablename__ = "tokens"
+    
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     service: Mapped[str] = mapped_column(String, index=True) 
@@ -88,8 +92,13 @@ class Token(Base):
     refresh_token: Mapped[str] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
     user = relationship("User", back_populates="tokens")
-    __table_args__ = (UniqueConstraint('user_id', 'service', name='uq_user_service'),)
+    
+    __table_args__ = (
+        UniqueConstraint('user_id', 'service', name='uq_user_service'),
+    )
+
 
 class StateToken(Base):
     __tablename__ = "state_tokens"
@@ -98,6 +107,7 @@ class StateToken(Base):
     return_path: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc) + timedelta(minutes=10)) 
+
     user = relationship("User", back_populates="state_tokens")
 
 
@@ -107,26 +117,26 @@ def create_user_db(db: Session, email: str, password: str, **kwargs) -> User:
     hashed_password = pwd_context.hash(password)
     db_user = User(email=email, hashed_password=hashed_password, **kwargs)
     db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
     return db_user
 
 def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
 
 def get_user_profile_db(db: Session, user_id: int) -> Optional[User]:
+    # Optimization: get() is faster for PK lookups
     return db.query(User).filter(User.id == user_id).first()
 
 def create_audit_log(db: Session, user_id: int, event_type: str, ip_address: Optional[str] = None):
     db_log = AuditLog(user_id=user_id, event_type=event_type, ip_address=ip_address)
     db.add(db_log)
-    db.commit()
 
 def save_google_token(db: Session, user_id: int, token_data: dict):
     service = 'google_sheets'
     existing_token = db.query(Token).filter(Token.user_id == user_id, Token.service == service).first()
+    
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=token_data['expires_in']) if token_data.get('expires_in') else None
+
     if existing_token:
         existing_token.access_token = token_data['access_token']
         if token_data.get('refresh_token'):
@@ -134,15 +144,21 @@ def save_google_token(db: Session, user_id: int, token_data: dict):
         existing_token.expires_at = expires_at
         existing_token.created_at = now
     else:
-        new_token = Token(user_id=user_id, service=service, access_token=token_data['access_token'], refresh_token=token_data.get('refresh_token'), expires_at=expires_at)
+        new_token = Token(
+            user_id=user_id,
+            service=service,
+            access_token=token_data['access_token'],
+            refresh_token=token_data.get('refresh_token'),
+            expires_at=expires_at
+        )
         db.add(new_token)
-    db.commit()
 
 def get_user_id_from_state_db(db: Session, state_uuid: str) -> Optional[dict]:
     state_record = db.query(StateToken).filter(StateToken.state_uuid == state_uuid).first()
-    if not state_record: return None
+    if not state_record:
+        return None
     
-    # FIX: Safety check for timezone awareness to prevent comparison crashes
+    # Critical Fix: Ensure comparison is timezone aware
     expiry = state_record.expires_at
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
@@ -151,16 +167,19 @@ def get_user_id_from_state_db(db: Session, state_uuid: str) -> Optional[dict]:
         db.delete(state_record)
         db.commit() 
         return None
-    return {"user_id": state_record.user_id, "return_path": state_record.return_path}
+        
+    return {
+        "user_id": state_record.user_id,
+        "return_path": state_record.return_path
+    }
 
 def delete_state_from_db(db: Session, state_uuid: str):
     db.query(StateToken).filter(StateToken.state_uuid == state_uuid).delete()
-    db.commit()
 
 def verify_password_helper(plain_password: str, hashed_password: str) -> bool:
-    try: 
+    try:
         return pwd_context.verify(plain_password, hashed_password)
-    except Exception: 
+    except Exception:
         return False
 
 def get_google_token(db: Session, user_id: int) -> Optional[Token]:
@@ -168,7 +187,6 @@ def get_google_token(db: Session, user_id: int) -> Optional[Token]:
 
 def save_state_to_db(db: Session, user_id: int, state_uuid: str, return_path: str):
     db.add(StateToken(state_uuid=state_uuid, user_id=user_id, return_path=return_path))
-    db.commit()
 
 def get_latest_dashboard_db(db: Session, user_id: int) -> Optional[Dashboard]:
     return db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
@@ -181,15 +199,3 @@ def get_audit_logs_db(db: Session, user_id: int, limit: int = 10) -> List[AuditL
 
 def get_tokens_metadata_db(db: Session, user_id: int) -> List[Token]:
     return db.query(Token).filter(Token.user_id == user_id).all()
-
-def activate_user_subscription(db: Session, email: str, subscription_id: Optional[str] = None):
-    user = db.query(User).filter(User.email == email).first()
-    if user:
-        user.is_active = True
-        if subscription_id: 
-            user.subscription_id = subscription_id
-        create_audit_log(db, user_id=user.id, event_type="SUBSCRIPTION_ACTIVATED")
-        db.commit()
-        db.refresh(user) # Ensure we return the updated state
-        return user
-    return None

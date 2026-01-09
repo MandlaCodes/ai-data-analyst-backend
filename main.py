@@ -1,27 +1,25 @@
-# --- CLEAN THESE IMPORTS ---
 import os
 import sys
 import json
 import httpx 
 import uuid
-import hmac
-import hashlib
-import base64 
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional, List, Union, Any
 from urllib.parse import urlencode 
 
-from fastapi import FastAPI, Request, HTTPException, Header, Depends, Query, status
+# FastAPI and dependencies
+from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, JSONResponse
-from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr 
 from sqlalchemy.orm import Session
+from fastapi.responses import RedirectResponse, JSONResponse
+from pydantic import BaseModel, EmailStr 
 from jose import jwt, JWTError
-from openai import AsyncOpenAI
-from standardwebhooks import Webhook
+from fastapi.security import OAuth2PasswordBearer
 
-# IMPORTANT: Notice we DO NOT import get_db because it isn't in db.py
+# Official OpenAI SDK
+from openai import AsyncOpenAI
+
+# Import all models, engine, and helper functions from db.py
 from db import (
     User, AuditLog, Dashboard, Settings, Token, StateToken,
     Base, engine, SessionLocal,
@@ -30,12 +28,8 @@ from db import (
     get_audit_logs_db, get_tokens_metadata_db, 
     save_google_token, get_google_token, 
     save_state_to_db, get_user_id_from_state_db, delete_state_from_db,
-    verify_password_helper,
-    activate_user_subscription
+    verify_password_helper 
 )
-from checkout import create_metria_checkout 
-# --- END CLEAN IMPORTS ---
-
 
 # --- Environment and Configuration ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "METRIA_SECURE_PHRASE_2025") 
@@ -43,6 +37,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 API_TITLE = "Metria Neural Engine API" 
+
 GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI")
@@ -56,10 +51,8 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI(title=API_TITLE)
 
 # -------------------- CORS Configuration --------------------
-# Ensure these do NOT have trailing slashes
 origins = [
-    "https://metria.dev",
-    "https://www.metria.dev",
+    FRONTEND_URL, 
     "http://localhost:3000",
     "http://localhost:5173",
 ]
@@ -68,19 +61,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins, 
     allow_credentials=True,
-    # Be explicit about methods and headers to satisfy strict browser checks
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=[
-        "Authorization", 
-        "Content-Type", 
-        "Cache-Control", 
-        "X-Requested-With",
-        "webhook-signature" # Added since your Polar hook uses this
-    ],
-    expose_headers=["*"] # Allows frontend to see all response headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-# Your Webhook Secret from the Polar Dashboard
-POLAR_WEBHOOK_SECRET = os.environ.get("POLAR_WEBHOOK_SECRET")
 
 # -------------------- DATABASE DEPENDENCY --------------------
 
@@ -183,7 +166,7 @@ def get_user_from_query_token(token: str, db: Session):
     except (JWTError, ValueError):
         raise credentials_exception
 
-def get_current_user(db: Session = Depends(get_db), user_id: int = Depends(get_current_user_id)):
+def get_current_user(db: DBSession, user_id: Annotated[int, Depends(get_current_user_id)]):
     user = get_user_profile_db(db, user_id)
     if user is None:
         raise credentials_exception
@@ -212,93 +195,13 @@ class ProfileUpdateRequest(BaseModel):
     organization: Optional[str]
     industry: Optional[str]
 
-class CheckoutRequest(BaseModel):
-    email: EmailStr
-
-
-
-@app.post("/webhook/polar")
-async def polar_webhook(request: Request):
-    raw_payload = await request.body()
-    signature = request.headers.get("webhook-signature", "")
-    secret = os.environ.get("POLAR_WEBHOOK_SECRET")
-
-    if not secret:
-        return JSONResponse(status_code=500, content={"detail": "Webhook secret not configured"})
-
-    # 1. Verification logic
-    received_hash = signature.split("v1=")[-1] if "v1=" in signature else signature
-    computed_hash = hmac.new(
-        secret.encode('utf-8'),
-        raw_payload,
-        hashlib.sha256
-    ).hexdigest()
-
-    if not hmac.compare_digest(computed_hash, received_hash):
-        print(f"DEBUG: Signature mismatch, attempting manual override for recovery.")
-    
-    try:
-        # 2. Parse and LOG the data
-        data = json.loads(raw_payload)
-        
-        # --- THE DEBUG LOGGER ---
-        # This will print the entire payload to your Render logs so we can see the structure
-        print("--- INCOMING POLAR WEBHOOK DATA ---")
-        print(json.dumps(data, indent=2)) 
-        print("-----------------------------------")
-        
-        event_data = data.get("data", {})
-        
-        # 3. Extract the Subscription ID
-        polar_sub_id = event_data.get("id") 
-        
-        # 4. Extract Customer Email
-        customer_email = (
-            event_data.get("metadata", {}).get("email") or 
-            event_data.get("customer", {}).get("email")
-        )
-
-        if customer_email:
-            db = SessionLocal()
-            try:
-                # 5. Activate in DB
-                user = activate_user_subscription(db, customer_email, subscription_id=polar_sub_id)
-                
-                if user:
-                    print(f"FORCE ACTIVE SUCCESS: {customer_email} (ID: {polar_sub_id})")
-                else:
-                    print(f"WEBHOOK ALERT: Email {customer_email} found in webhook but NO USER found in Database.")
-                
-                return {"status": "success", "msg": "Processing complete"}
-            finally:
-                db.close()
-        
-        print("WEBHOOK ALERT: No customer email found in payload.")
-        return {"status": "success"}
-
-    except Exception as e:
-        print(f"WEBHOOK CRITICAL ERROR: {str(e)}")
-        return JSONResponse(status_code=400, content={"detail": "Error processing webhook"})
-# -------------------- PAYMENT & ACTIVATION --------------------
-
-@app.post("/payments/create-checkout", tags=["Auth"])
-async def generate_checkout_link(payload: CheckoutRequest):
-    try:
-        checkout_url = create_metria_checkout(payload.email)
-        if not checkout_url:
-            raise HTTPException(status_code=500, detail="Payment Engine failed to initialize.")
-        return {"url": checkout_url}
-    except Exception as e:
-        print(f"Checkout Generation Error: {e}")
-        raise HTTPException(status_code=500, detail="Could not connect to payment provider.")
-
 @app.post("/auth/signup", tags=["Auth"])
 def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
     
     user = create_user_db(
-        db,
+        db, 
         email=payload.email, 
         password=payload.password,
         first_name=payload.first_name,
@@ -346,99 +249,98 @@ def login(payload: UserLogin, db: DBSession, request: Request):
         }
     }
 
-# --- Updated Profile Routes ---
-
-@app.get("/api/auth/me", tags=["Auth"])
-async def get_me(user: AuthUser, db: Session = Depends(get_db)):
-    # 1. Kill the cache for this specific user object
-    db.expire(user) 
-    # 2. Re-pull the fresh data (where is_active is now True)
-    db.refresh(user) 
-
-    return {
-        "id": user.id,
+@app.get("/auth/me", tags=["Auth"])
+def me(user: AuthUser):
+    return { 
+        "user_id": user.id, 
         "email": user.email,
         "first_name": user.first_name,
         "last_name": user.last_name,
         "organization": user.organization,
-        "industry": user.industry,
-        "is_active": user.is_active, # This will now be True
-        "subscription_id": user.subscription_id
-    }
-
-@app.get("/api/auth/status")
-async def get_subscription_status(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    db.refresh(current_user)
-    return {
-        "is_active": current_user.is_active,
-        "email": current_user.email
+        "industry": user.industry
     }
 
 @app.put("/auth/profile/update", tags=["Auth"])
-def update_profile(payload: ProfileUpdateRequest, user: AuthUser, db: DBSession):
-    # 'user' is already fetched via AuthUser dependency
+def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSession):
+    user = get_user_profile_db(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
     user.first_name = payload.first_name
     user.last_name = payload.last_name
     user.organization = payload.organization
     user.industry = payload.industry
     
     db.commit()
-    db.refresh(user) # Refresh here too so the frontend gets the new names immediately
+    db.refresh(user)
     return user
-
-# -------------------- AI ANALYST ROUTES --------------------
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
 async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession):
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Subscription required for AI synthesis.")
-
+    # Mapping exact names from your User DB (db.py)
     org = user.organization if user.organization else "the organization"
     ind = user.industry if user.industry else "the current sector"
-    
+    exec_name = user.first_name if user.first_name else "Executive"
+
+    # Improved few-shot to show the AI how to handle long-form paragraphs
     few_shot = (
         "EXAMPLE_INPUT: Customer churn increased 5% in the Enterprise segment this month.\n"
         "EXAMPLE_OUTPUT: {"
         "\"summary\": \"Enterprise churn spike detected, threatening core recurring revenue.\", "
         "\"root_cause\": \"Technical friction in the API integration layer for Tier-1 clients.\", "
-        "\"risk\": \"The current escalation in churn suggests a potential loss of $2M in LTV if the integration friction is not resolved.\", "
-        "\"opportunity\": \"By automating the API troubleshooting, we can improve retention by 12% across all high-value accounts.\", "
-        "\"action\": \"Immediately deploy the engineering task force to patch the integration gateway.\", "
+        "\"risk\": \"The current escalation in churn suggests a potential loss of $2M in LTV if the integration friction is not resolved. This pattern specifically threatens the Q3 expansion targets in the enterprise sector. Failure to intervene will likely trigger a competitor migration wave.\", "
+        "\"opportunity\": \"By automating the API troubleshooting, we can improve retention by 12% across all high-value accounts. This efficiency gain allows the Success Team to focus on upsell opportunities rather than fire-fighting. Implementation creates a distinct competitive advantage in service reliability.\", "
+        "\"action\": \"Immediately deploy the engineering task force to patch the integration gateway. Simultaneously, the Executive Success team should initiate high-touch outreach to the top 10 impacted accounts. Schedule a post-mortem for Friday to prevent recurrence.\", "
         "\"roi_impact\": \"-$120,000 ARR risk prevention\", "
         "\"confidence\": 0.94}"
     )
 
     system_prompt = (
-        f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
-        "Respond ONLY in valid JSON.\n\n"
-        f"{few_shot}\n\n"
-        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'."
-    )
+    f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
+    f"You are reporting to {exec_name}. Provide an elite executive-level analysis that replaces the need for a human consultant and data analyst. "
+    "Respond ONLY in valid JSON.\n\n"
+    f"{few_shot}\n\n"
+    "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'.\n\n"
+    "CONSTRAINTS:\n"
+    "1. 'summary': A high-impact executive statement (2-3 sentences maximum).\n"
+    "2. 'risk', 'opportunity', 'action': Each MUST be detailed paragraphs with a MINIMUM of 3 deep analytical sentences. "
+    f"Connect the insights specifically to the {ind} industry and {org}'s unique position.\n"
+    "3. 'root_cause': Provide a technical, data-driven explanation of the primary driver(s) detected.\n"
+    "4. 'roi_impact': Estimated financial impact in local currency (e.g., '$50k - $100k'). Include assumptions if relevant.\n"
+    "5. 'confidence': Float 0.0-1.0.\n"
+    "ADDITIONAL INSTRUCTIONS:\n"
+    "- Detect trends, anomalies, and patterns in numeric and categorical data.\n"
+    "- Quantify impacts (financial, operational, or performance metrics) wherever possible.\n"
+    "- Include breakdowns by time period, category, region, or staff if applicable.\n"
+    "STYLE: Use professional, high-velocity language. Avoid generic advice; focus on tactical precision."
+)
+
 
     user_prompt = f"Data Context: {json.dumps(payload.context)}."
 
     try:
         raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
-        return json.loads(raw_ai_response)
+        parsed_response = json.loads(raw_ai_response)
+        
+        # Security check: Ensure 'summary' exists even if AI uses 'executive_summary'
+        if "executive_summary" in parsed_response and "summary" not in parsed_response:
+            parsed_response["summary"] = parsed_response["executive_summary"]
+            
+        return parsed_response
     except Exception as e:
         print(f"AI Analysis Logic Error: {e}")
         raise HTTPException(status_code=500, detail="Neural Engine failed to synthesize data.")
 
 @app.post("/ai/chat", tags=["AI Analyst"])
 async def chat_with_data(payload: AIChatRequest, user: AuthUser, db: DBSession):
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Subscription required.")
-    
     org_ctx = f"The user works at {user.organization}." if user.organization else ""
     ind_ctx = f"Industry: {user.industry}." if user.industry else ""
     exec_name = user.first_name if user.first_name else "Client"
     
     system_prompt = (
         f"You are MetriaAI, an elite data analyst for {exec_name}. {org_ctx} {ind_ctx} "
-        "Answer questions based on the provided data context with high precision."
+        "Answer questions based on the provided data context with high precision and strategic depth. "
+        "Maintain a professional, executive tone."
     )
     user_prompt = f"Context: {json.dumps(payload.context)}\n\nQuestion: {payload.message}"
     
@@ -447,20 +349,23 @@ async def chat_with_data(payload: AIChatRequest, user: AuthUser, db: DBSession):
 
 @app.post("/ai/compare-trends", tags=["AI Analyst"])
 async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
-    user = get_user_profile_db(db, user_id)
-    if not user.is_active:
-        raise HTTPException(status_code=403, detail="Subscription required.")
-
+    # Using your Dashboard model from db.py
     base_session = db.query(Dashboard).filter(Dashboard.id == payload.base_id, Dashboard.user_id == user_id).first()
     target_session = db.query(Dashboard).filter(Dashboard.id == payload.target_id, Dashboard.user_id == user_id).first()
 
     if not base_session or not target_session:
         raise HTTPException(status_code=404, detail="One or both sessions not found")
 
+    # Extracting the AI storage from your layout_data Text column
     base_data = json.loads(base_session.layout_data).get("ai_insight", {})
     target_data = json.loads(target_session.layout_data).get("ai_insight", {})
 
-    system_prompt = "Identify metrics drift between two reports. Limit to 3 powerful sentences."
+    system_prompt = (
+        "You are a Strategic Growth Specialist. Compare these two historical reports. "
+        "Identify metrics drift, performance improvements, and emerging delta-risks. "
+        "Provide a technical assessment of how the strategy has evolved. Limit to 3 powerful, data-backed sentences."
+    )
+    
     user_prompt = f"Previous Analysis: {json.dumps(base_data)}\nCurrent Analysis: {json.dumps(target_data)}"
     comparison = await call_openai_analyst(user_prompt, system_prompt, json_mode=False)
     return {"comparison": comparison}
@@ -491,6 +396,7 @@ def google_oauth_start(token: str, db: Session = Depends(get_db), return_path: s
 async def google_oauth_callback(code: str, state: str, db: DBSession, request: Request):
     state_data = get_user_id_from_state_db(db, state_uuid=state)
     if not state_data:
+        # If state missing, redirect to frontend integrations with error param
         return RedirectResponse(url=f"{FRONTEND_URL}/dashboard/integrations?connected=false&error=session_expired")
         
     user_id = state_data["user_id"]
@@ -620,15 +526,30 @@ def get_analysis_trends(user_id: AuthUserID, db: DBSession):
             continue
     return trends
 
+# -------------------- SYSTEM --------------------
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "engine": "Metria Neural Core 5.0 - High Velocity Tier"}
+
+@app.get("/")
+def root():
+    return {"message": "MetriaAI API Online - Mission Ready"}
+# Add this inside main.py, preferably near the other Google routes
+
 @app.get("/google-token", tags=["Integrations"])
 async def get_active_google_token(user_id: AuthUserID, db: DBSession):
+    """
+    Retrieves the raw Google Access Token for the Picker API.
+    Handles automatic refreshing if the token is expired.
+    """
     token_obj = get_google_token(db, user_id)
     if not token_obj:
         raise HTTPException(status_code=404, detail="Google account not connected")
 
+    # Check if token is expired or about to expire (within 1 minute)
     now = datetime.now(timezone.utc)
-    # Fix: Ensure expires_at is compared correctly
-    if token_obj.expires_at and token_obj.expires_at.replace(tzinfo=timezone.utc) <= (now + timedelta(minutes=1)):
+    if token_obj.expires_at and token_obj.expires_at <= (now + timedelta(minutes=1)):
         if token_obj.refresh_token:
             async with httpx.AsyncClient() as client_http:
                 r = await client_http.post("https://oauth2.googleapis.com/token", data={
@@ -649,13 +570,3 @@ async def get_active_google_token(user_id: AuthUserID, db: DBSession):
             raise HTTPException(status_code=401, detail="Token expired and no refresh token available.")
 
     return {"access_token": token_obj.access_token}
-
-# -------------------- SYSTEM --------------------
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "engine": "Metria Neural Core 5.0 - High Velocity Tier"}
-
-@app.get("/")
-def root():
-    return {"message": "MetriaAI API Online - Mission Ready"}
