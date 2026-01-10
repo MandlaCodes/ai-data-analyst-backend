@@ -302,7 +302,7 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     f"{few_shot}\n\n"
     "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'.\n\n"
     "CONSTRAINTS:\n"
-    "1. 'summary': A high-impact executive statement (2-3 sentences maximum).\n"
+    "1. 'summary': A high-impact executive statement (3 sentences).\n"
     "2. 'risk', 'opportunity', 'action': Each MUST be detailed paragraphs with a MINIMUM of 3 deep analytical sentences. "
     f"Connect the insights specifically to the {ind} industry and {org}'s unique position.\n"
     "3. 'root_cause': Provide a technical, data-driven explanation of the primary driver(s) detected.\n"
