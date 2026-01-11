@@ -275,46 +275,67 @@ def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSes
     db.refresh(user)
     return user
 
+class AIAnalysisRequest(BaseModel):
+    context: Union[dict, List[dict]]
+    # Add an alias so it works whether frontend sends 'strategy' or 'mode'
+    strategy: Optional[str] = "standalone" 
+    mode: Optional[str] = None
+
+# -------------------- RE-ENGINEERED ANALYZE ROUTE --------------------
+
 @app.post("/ai/analyze", tags=["AI Analyst"])
 async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession):
-    # Mapping exact names from your User DB (db.py)
     org = user.organization if user.organization else "the organization"
     ind = user.industry if user.industry else "the current sector"
     exec_name = user.first_name if user.first_name else "Executive"
 
-    # Improved few-shot to show the AI how to handle long-form paragraphs
+    # --- STRATEGIC LOGIC INJECTION ---
+    # We dynamically change the 'Persona' based on the frontend strategy
+    strategy_prompt = ""
+    if payload.strategy == "correlation":
+        strategy_prompt = (
+            "STRATEGIC MISSION: CROSS-DATASET CORRELATION. "
+            "You are looking for hidden dependencies between multiple data streams. "
+            "How does a shift in stream A predict a result in stream B? "
+            "Focus on 'Inter-stream Causality'."
+        )
+    elif payload.strategy == "compare":
+        strategy_prompt = (
+            "STRATEGIC MISSION: COMPARATIVE BENCHMARKING. "
+            "Analyze the performance deltas between these datasets. "
+            "Identify which stream is overperforming and why. "
+            "Focus on 'Variance Analysis'."
+        )
+    else:
+        strategy_prompt = (
+            "STRATEGIC MISSION: STANDALONE DEEP-DIVE. "
+            "Focus on the primary dataset to identify immediate operational wins."
+        )
+
     few_shot = (
-        "EXAMPLE_INPUT: Customer churn increased 5% in the Enterprise segment this month.\n"
+        "EXAMPLE_INPUT: Customer churn increased 5%... \n"
         "EXAMPLE_OUTPUT: {"
         "\"summary\": \"Enterprise churn spike detected, threatening core recurring revenue.\", "
-        "\"root_cause\": \"Technical friction in the API integration layer for Tier-1 clients.\", "
-        "\"risk\": \"The current escalation in churn suggests a potential loss of $2M in LTV if the integration friction is not resolved. This pattern specifically threatens the Q3 expansion targets in the enterprise sector. Failure to intervene will likely trigger a competitor migration wave.\", "
-        "\"opportunity\": \"By automating the API troubleshooting, we can improve retention by 12% across all high-value accounts. This efficiency gain allows the Success Team to focus on upsell opportunities rather than fire-fighting. Implementation creates a distinct competitive advantage in service reliability.\", "
-        "\"action\": \"Immediately deploy the engineering task force to patch the integration gateway. Simultaneously, the Executive Success team should initiate high-touch outreach to the top 10 impacted accounts. Schedule a post-mortem for Friday to prevent recurrence.\", "
+        "\"root_cause\": \"Technical friction in the API integration layer...\", "
+        "\"risk\": \"The current escalation in churn suggests a potential loss of $2M in LTV...\", "
+        "\"opportunity\": \"By automating the API troubleshooting, we can improve retention by 12%...\", "
+        "\"action\": \"Immediately deploy engineering task force to patch the gateway...\", "
         "\"roi_impact\": \"-$120,000 ARR risk prevention\", "
         "\"confidence\": 0.94}"
     )
 
     system_prompt = (
-    f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
-    f"You are reporting to {exec_name}. Provide an elite executive-level analysis that replaces the need for a human consultant and data analyst. "
-    "Respond ONLY in valid JSON.\n\n"
-    f"{few_shot}\n\n"
-    "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'.\n\n"
-    "CONSTRAINTS:\n"
-    "1. 'summary': A high-impact executive statement (3 sentences).\n"
-    "2. 'risk', 'opportunity', 'action': Each MUST be detailed paragraphs with a MINIMUM of 3 deep analytical sentences. "
-    f"Connect the insights specifically to the {ind} industry and {org}'s unique position.\n"
-    "3. 'root_cause': Provide a technical, data-driven explanation of the primary driver(s) detected.\n"
-    "4. 'roi_impact': Estimated financial impact in local currency (e.g., '$50k - $100k'). Include assumptions if relevant.\n"
-    "5. 'confidence': Float 0.0-1.0.\n"
-    "ADDITIONAL INSTRUCTIONS:\n"
-    "- Detect trends, anomalies, and patterns in numeric and categorical data.\n"
-    "- Quantify impacts (financial, operational, or performance metrics) wherever possible.\n"
-    "- Include breakdowns by time period, category, region, or staff if applicable.\n"
-    "STYLE: Use professional, high-velocity language. Avoid generic advice; focus on tactical precision."
-)
-
+        f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
+        f"You are reporting to {exec_name}. {strategy_prompt} "
+        "Respond ONLY in valid JSON.\n\n"
+        f"{few_shot}\n\n"
+        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'.\n\n"
+        "CONSTRAINTS:\n"
+        "1. 'summary': A high-impact executive statement (3 sentences).\n"
+        "2. 'risk', 'opportunity', 'action': Detailed paragraphs (MIN 3 sentences). "
+        "3. 'roi_impact': Estimated financial impact (e.g., '$50k - $100k').\n"
+        "STYLE: Professional, high-velocity language. Avoid generic advice."
+    )
 
     user_prompt = f"Data Context: {json.dumps(payload.context)}."
 
@@ -322,7 +343,7 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
         raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
         parsed_response = json.loads(raw_ai_response)
         
-        # Security check: Ensure 'summary' exists even if AI uses 'executive_summary'
+        # Mapping fix for consistency
         if "executive_summary" in parsed_response and "summary" not in parsed_response:
             parsed_response["summary"] = parsed_response["executive_summary"]
             
@@ -330,7 +351,6 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     except Exception as e:
         print(f"AI Analysis Logic Error: {e}")
         raise HTTPException(status_code=500, detail="Neural Engine failed to synthesize data.")
-
 @app.post("/ai/chat", tags=["AI Analyst"])
 async def chat_with_data(payload: AIChatRequest, user: AuthUser, db: DBSession):
     org_ctx = f"The user works at {user.organization}." if user.organization else ""
