@@ -292,13 +292,14 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     # --- STRATEGIC LOGIC INJECTION ---
     # We dynamically change the 'Persona' based on the frontend strategy
     strategy_prompt = ""
-    if payload.strategy == "correlation":
-        strategy_prompt = (
-            "STRATEGIC MISSION: CROSS-DATASET CORRELATION. "
-            "You are looking for hidden dependencies between multiple data streams. "
-            "How does a shift in stream A predict a result in stream B? "
-            "Focus on 'Inter-stream Causality'."
-        )
+   if payload.strategy == "correlation":
+    strategy_prompt = (
+        "STRATEGIC MISSION: MULTI-STREAM NEURAL CORRELATION. "
+        "Your goal is to identify 'The Price of Growth'. Look for inverse relationships: "
+        "where efficiency in one stream (e.g., Marketing CPC) is creating a catastrophic "
+        "bottleneck in another (e.g., Support Sentiment or Churn). "
+        "Explicitly quantify the 'Value Leak'—how much profit is being lost due to this friction."
+    )
     elif payload.strategy == "compare":
         strategy_prompt = (
             "STRATEGIC MISSION: COMPARATIVE BENCHMARKING. "
@@ -334,10 +335,16 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
         "1. 'summary': A high-impact executive statement (3 sentences).\n"
         "2. 'risk', 'opportunity', 'action': Detailed paragraphs (MIN 3 sentences). "
         "3. 'roi_impact': Estimated financial impact (e.g., '$50k - $100k').\n"
-        "STYLE: Professional, high-velocity language. Avoid generic advice."
+        "STYLE: High-velocity, aggressive executive language. Use power verbs. "
+        "Never say 'it seems' or 'potentially'—use data-backed conviction. "
+        "If the correlation is negative, call it a 'Systemic Failure' or 'Profit Leak'."
     )
 
-    user_prompt = f"Data Context: {json.dumps(payload.context)}."
+   user_prompt = (
+    f"INPUT STREAMS DETECTED: {len(payload.context)} distinct datasets. "
+    f"Data Context: {json.dumps(payload.context)}. "
+    "Execute cross-stream synthesis now."
+)
 
     try:
         raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
