@@ -294,25 +294,25 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     strategy_prompt = ""
    if payload.strategy == "correlation":
     strategy_prompt = (
-        "STRATEGIC MISSION: MULTI-STREAM NEURAL CORRELATION. "
-        "Your goal is to identify 'The Price of Growth'. Look for inverse relationships: "
-        "where efficiency in one stream (e.g., Marketing CPC) is creating a catastrophic "
-        "bottleneck in another (e.g., Support Sentiment or Churn). "
-        "Explicitly quantify the 'Value Leak'—how much profit is being lost due to this friction."
+        "MISSION: MULTI-VECTOR NEURAL SYNTHESIS. You are identifying the 'hidden gears' of the business. "
+        "Map the causal chain: How does an upstream flux in one silo (e.g., Ad Spend) create a downstream "
+        "impact in another (e.g., Support Latency or Churn). "
+        "Identify 'Lead/Lag Indicators' and quantify the 'Network Friction' as a dollar value."
     )
-    elif payload.strategy == "compare":
-        strategy_prompt = (
-            "STRATEGIC MISSION: COMPARATIVE BENCHMARKING. "
-            "Analyze the performance deltas between these datasets. "
-            "Identify which stream is overperforming and why. "
-            "Focus on 'Variance Analysis'."
-        )
-    else:
-        strategy_prompt = (
-            "STRATEGIC MISSION: STANDALONE DEEP-DIVE. "
-            "Focus on the primary dataset to identify immediate operational wins."
-        )
-
+elif payload.strategy == "compare":
+    strategy_prompt = (
+        "MISSION: RELATIVE PERFORMANCE BENCHMARKING. You are a High-Velocity Auditor. "
+        "Rank all active streams by ROI density and Operational Efficiency. "
+        "Isolate 'Performance Deltas' and 'Standard Deviation Outliers'. "
+        "Tell the executive which stream is the 'Growth Engine' and which is the 'Dead Weight'."
+    )
+else:  # Standalone / Independent
+    strategy_prompt = (
+        "MISSION: AUTONOMOUS SILO DEEP-DIVE. Treat each dataset as an isolated P&L entity. "
+        "Perform a high-fidelity audit on the primary stream's internal health only. "
+        "Strictly prohibit cross-pollination of logic. Provide 100% granular focus on the "
+        "singular stream's immediate tactical failures and wins."
+    )
     few_shot = (
         "EXAMPLE_INPUT: Customer churn increased 5%... \n"
         "EXAMPLE_OUTPUT: {"
