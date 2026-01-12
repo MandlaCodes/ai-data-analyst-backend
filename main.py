@@ -289,90 +289,58 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     ind = user.industry if user.industry else "the current sector"
     exec_name = user.first_name if user.first_name else "Executive"
 
-    # --- STRATEGIC LOGIC INJECTION ---
-    # We dynamically change the 'Persona' based on the frontend strategy
-    strategy_prompt = ""
-   if payload.strategy == "correlation":
-    strategy_prompt = (
-        "MISSION: MULTI-VECTOR NEURAL SYNTHESIS. You are identifying the 'hidden gears' of the business. "
-        "Map the causal chain: How does an upstream flux in one silo (e.g., Ad Spend) create a downstream "
-        "impact in another (e.g., Support Latency or Churn). "
-        "Identify 'Lead/Lag Indicators' and quantify the 'Network Friction' as a dollar value."
-    )
-elif payload.strategy == "compare":
-    strategy_prompt = (
-        "MISSION: RELATIVE PERFORMANCE BENCHMARKING. You are a High-Velocity Auditor. "
-        "Rank all active streams by ROI density and Operational Efficiency. "
-        "Isolate 'Performance Deltas' and 'Standard Deviation Outliers'. "
-        "Tell the executive which stream is the 'Growth Engine' and which is the 'Dead Weight'."
-    )
-else:  # Standalone / Independent
-    strategy_prompt = (
-        "MISSION: AUTONOMOUS SILO DEEP-DIVE. Treat each dataset as an isolated P&L entity. "
-        "Perform a high-fidelity audit on the primary stream's internal health only. "
-        "Strictly prohibit cross-pollination of logic. Provide 100% granular focus on the "
-        "singular stream's immediate tactical failures and wins."
-    )
-    few_shot = (
-        "EXAMPLE_INPUT: Customer churn increased 5%... \n"
-        "EXAMPLE_OUTPUT: {"
-        "\"summary\": \"Enterprise churn spike detected, threatening core recurring revenue.\", "
-        "\"root_cause\": \"Technical friction in the API integration layer...\", "
-        "\"risk\": \"The current escalation in churn suggests a potential loss of $2M in LTV...\", "
-        "\"opportunity\": \"By automating the API troubleshooting, we can improve retention by 12%...\", "
-        "\"action\": \"Immediately deploy engineering task force to patch the gateway...\", "
-        "\"roi_impact\": \"-$120,000 ARR risk prevention\", "
-        "\"confidence\": 0.94}"
-    )
+    # --- STRATEGIC LOGIC INJECTION: PURE BUSINESS TERMINOLOGY ---
+    if payload.strategy == "correlation":
+        strategy_prompt = (
+            "MISSION: SYSTEM SYNERGY AUDIT. Your goal is to find out if Department A is sabotaging Department B. "
+            "Map the ripple effect: How does a win in one area trigger a failure in another? "
+            "TRUTH GUARDRAIL: If these datasets are unrelated, do not force a connection. "
+            "Instead, flag it as 'Operational Fragmentation'—the right hand doesn't know what the left is doing."
+        )
+        trigger = "Analyze systemic ripple effects and operational overlap."
+    elif payload.strategy == "compare":
+        strategy_prompt = (
+            "MISSION: CAPITAL ALLOCATION BENCHMARKING. Rank these streams by financial density. "
+            "Identify the 'Growth Engine' that deserves more budget and the 'Value Sink' that is "
+            "bleeding resources. Contrast their efficiency without looking for causal links."
+        )
+        trigger = "Benchmark capital efficiency and rank performance tiers."
+    else:  # Standalone
+        strategy_prompt = (
+            "MISSION: P&L ISOLATION AUDIT. Treat this as a single-business deep dive. "
+            "Ignore all other noise. Focus exclusively on the internal mechanics, "
+            "tactical wins, and immediate threats of this specific stream."
+        )
+        trigger = "Audit standalone business health and tactical failures."
 
     system_prompt = (
-        f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
+        f"You are the Lead Strategic Data Analyst at {org}, specializing in {ind}. "
         f"You are reporting to {exec_name}. {strategy_prompt} "
-        "Respond ONLY in valid JSON.\n\n"
-        f"{few_shot}\n\n"
-        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'.\n\n"
-        "CONSTRAINTS:\n"
-        "1. 'summary': A high-impact executive statement (3 sentences).\n"
-        "2. 'risk', 'opportunity', 'action': Detailed paragraphs (MIN 3 sentences). "
-        "3. 'roi_impact': Estimated financial impact (e.g., '$50k - $100k').\n"
-        "STYLE: High-velocity, aggressive executive language. Use power verbs. "
-        "Never say 'it seems' or 'potentially'—use data-backed conviction. "
-        "If the correlation is negative, call it a 'Systemic Failure' or 'Profit Leak'."
+        "Respond ONLY in valid JSON. "
+        "LANGUAGE RULE: Avoid technical jargon like 'parameters', 'stochastic', or 'data points'. "
+        "Use executive power words: 'Revenue Leak', 'Strategic Friction', 'Growth Engine', 'Capital Risk'. "
+        "CONSTRAINTS: If the data is junk or unrelated, call it a 'Visibility Gap'—never hallucinate. "
+        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'."
     )
 
-   user_prompt = (
-    f"INPUT STREAMS DETECTED: {len(payload.context)} distinct datasets. "
-    f"Data Context: {json.dumps(payload.context)}. "
-    "Execute cross-stream synthesis now."
-)
+    user_prompt = (
+        f"INPUT: {len(payload.context)} distinct business streams. "
+        f"Context: {json.dumps(payload.context)}. "
+        f"{trigger}"
+    )
 
     try:
         raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
         parsed_response = json.loads(raw_ai_response)
         
-        # Mapping fix for consistency
+        # Self-Correction to ensure the UI doesn't break
         if "executive_summary" in parsed_response and "summary" not in parsed_response:
-            parsed_response["summary"] = parsed_response["executive_summary"]
+            parsed_response["summary"] = parsed_response.pop("executive_summary")
             
         return parsed_response
     except Exception as e:
-        print(f"AI Analysis Logic Error: {e}")
-        raise HTTPException(status_code=500, detail="Neural Engine failed to synthesize data.")
-@app.post("/ai/chat", tags=["AI Analyst"])
-async def chat_with_data(payload: AIChatRequest, user: AuthUser, db: DBSession):
-    org_ctx = f"The user works at {user.organization}." if user.organization else ""
-    ind_ctx = f"Industry: {user.industry}." if user.industry else ""
-    exec_name = user.first_name if user.first_name else "Client"
-    
-    system_prompt = (
-        f"You are MetriaAI, an elite data analyst for {exec_name}. {org_ctx} {ind_ctx} "
-        "Answer questions based on the provided data context with high precision and strategic depth. "
-        "Maintain a professional, executive tone."
-    )
-    user_prompt = f"Context: {json.dumps(payload.context)}\n\nQuestion: {payload.message}"
-    
-    response_text = await call_openai_analyst(user_prompt, system_instruction=system_prompt, json_mode=False)
-    return {"reply": response_text}
+        # We use a generic error to keep the executive-facing side clean
+        raise HTTPException(status_code=500, detail="The Intelligence Engine encountered a visibility gap.")
 
 @app.post("/ai/compare-trends", tags=["AI Analyst"])
 async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
@@ -387,11 +355,16 @@ async def compare_historical_trends(payload: CompareTrendsRequest, user_id: Auth
     base_data = json.loads(base_session.layout_data).get("ai_insight", {})
     target_data = json.loads(target_session.layout_data).get("ai_insight", {})
 
+   # Update your system_prompt CONSTRAINTS section:
     system_prompt = (
-        "You are a Strategic Growth Specialist. Compare these two historical reports. "
-        "Identify metrics drift, performance improvements, and emerging delta-risks. "
-        "Provide a technical assessment of how the strategy has evolved. Limit to 3 powerful, data-backed sentences."
-    )
+    f"You are the world's best Lead Strategic Data Analyst at {org}... {strategy_prompt} "
+    "Respond ONLY in valid JSON.\n\n"
+    "CONSTRAINTS:\n"
+    "1. ... (your existing constraints)\n"
+    "4. TRUTH OFFSET: If the datasets show NO logical or statistical correlation, "
+    "do not invent one. Instead, define the 'Silo Friction'—explain why these "
+    "metrics are decoupled and why that decoupling is a risk or an inefficiency."
+)
     
     user_prompt = f"Previous Analysis: {json.dumps(base_data)}\nCurrent Analysis: {json.dumps(target_data)}"
     comparison = await call_openai_analyst(user_prompt, system_prompt, json_mode=False)
