@@ -319,6 +319,7 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
         "Respond ONLY in valid JSON. "
         "LANGUAGE RULE: Avoid technical jargon like 'parameters', 'stochastic', or 'data points'. "
         "Use executive power words: 'Revenue Leak', 'Strategic Friction', 'Growth Engine', 'Capital Risk'. "
+        "SENTENCE STRUCTURE RULE: Every reply in every JSON key must be exactly 3 sentences long. "
         "CONSTRAINTS: If the data is junk or unrelated, call it a 'Visibility Gap'—never hallucinate. "
         "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'."
     )
