@@ -580,33 +580,40 @@ from db import activate_user_trial_db
 async def start_trial(user: AuthUser, db: DBSession):
     try:
         async with httpx.AsyncClient() as client:
+            # UPDATED ENDPOINT
             response = await client.post(
-                "https://api.polar.sh/v1/checkouts/custom",
+                "https://api.polar.sh/v1/checkouts/", 
                 headers={
                     "Authorization": f"Bearer {os.environ.get('POLAR_ACCESS_TOKEN')}",
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
                 },
                 json={
                     "product_id": "8cda6e5c-1c89-43ce-91e3-32ad1d18cfce",
                     "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
                     "customer_email": user.email,
-                    "metadata": {"user_id": str(user.id)}
+                    # Ensure metadata is flat strings for best compatibility
+                    "metadata": {"user_id": str(user.id)} 
                 }
             )
             
-            if response.status_code != 201:
-                print(f"Polar API Error: {response.text}")
-                raise HTTPException(status_code=500, detail="Checkout creation failed.")
+            # Polar returns 201 for Created
+            if response.status_code not in [200, 201]:
+                print(f"Polar API Error ({response.status_code}): {response.text}")
+                raise HTTPException(status_code=response.status_code, detail=f"Polar Error: {response.text}")
 
             res_data = response.json()
+            
+            # Audit logging
             create_audit_log(db, user_id=user.id, event_type="CHECKOUT_INITIATED")
             db.commit()
 
+            # Return the checkout URL
             return {"checkout_url": res_data.get("url")}
             
     except Exception as e:
-        print(f"Connection Error: {e}")
-        raise HTTPException(status_code=500, detail="Billing gateway unreachable.")
+        print(f"System Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Replace everything from 'from polar_sdk import WebhookVerificationError' onwards with this:
 
