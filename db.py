@@ -34,10 +34,15 @@ class User(Base):
     email: Mapped[str] = mapped_column(String, unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String)
     
+    # --- Profile Fields ---
     first_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     organization: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     industry: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
+    # --- Billing & Access Fields ---
+    is_trial_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    polar_customer_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -123,12 +128,20 @@ def get_user_by_email(db: Session, email: str) -> Optional[User]:
     return db.query(User).filter(User.email == email).first()
 
 def get_user_profile_db(db: Session, user_id: int) -> Optional[User]:
-    # Optimization: get() is faster for PK lookups
     return db.query(User).filter(User.id == user_id).first()
 
 def create_audit_log(db: Session, user_id: int, event_type: str, ip_address: Optional[str] = None):
     db_log = AuditLog(user_id=user_id, event_type=event_type, ip_address=ip_address)
     db.add(db_log)
+
+def activate_user_trial_db(db: Session, user_id: int, customer_id: str):
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.is_trial_active = True
+        user.polar_customer_id = customer_id
+        db.commit()
+        return True
+    return False
 
 def save_google_token(db: Session, user_id: int, token_data: dict):
     service = 'google_sheets'
@@ -158,7 +171,6 @@ def get_user_id_from_state_db(db: Session, state_uuid: str) -> Optional[dict]:
     if not state_record:
         return None
     
-    # Critical Fix: Ensure comparison is timezone aware
     expiry = state_record.expires_at
     if expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)

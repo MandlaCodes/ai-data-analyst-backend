@@ -49,6 +49,9 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # --- Application Initialization ---
 app = FastAPI(title=API_TITLE)
+# ADD THIS: Initialize Polar Client
+from polar_sdk import Polar
+polar_client = Polar(access_token=os.environ.get("POLAR_ACCESS_TOKEN"))
 
 # -------------------- CORS Configuration --------------------
 origins = [
@@ -254,6 +257,7 @@ def me(user: AuthUser):
     return { 
         "user_id": user.id, 
         "email": user.email,
+        "is_trial_active": user.is_trial_active, # This tells the frontend to hide the paywall
         "first_name": user.first_name,
         "last_name": user.last_name,
         "organization": user.organization,
@@ -314,7 +318,7 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
         trigger = "Audit standalone business health and tactical failures."
 
     system_prompt = (
-        f"You are the Lead Strategic Data Analyst at {org}, specializing in {ind}. "
+        f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
         f"You are reporting to {exec_name}. {strategy_prompt} "
         "Respond ONLY in valid JSON. "
         "LANGUAGE RULE: Avoid technical jargon like 'parameters', 'stochastic', or 'data points'. "
@@ -571,3 +575,71 @@ async def get_active_google_token(user_id: AuthUserID, db: DBSession):
             raise HTTPException(status_code=401, detail="Token expired and no refresh token available.")
 
     return {"access_token": token_obj.access_token}
+
+# --- BILLING & POLAR INTEGRATION ---
+
+# 1. Ensure activate_user_trial_db is in your db.py imports at the top!
+# Scroll to the top and make sure 'activate_user_trial_db' is added to: 
+# from db import (...)
+from db import activate_user_trial_db 
+
+@app.post("/billing/start-trial", tags=["Billing"])
+async def start_trial(user: AuthUser, db: DBSession):
+    try:
+        # Generate the checkout link
+        res = polar_client.checkouts.create(request={
+            "products": ["8cda6e5c-1c89-43ce-91e3-32ad1d18cfce"], 
+            "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
+            "customer_email": user.email,
+            "metadata": {
+                "user_id": str(user.id) # This links the payment to your DB user
+            }
+        })
+        
+        # Log the attempt
+        create_audit_log(db, user_id=user.id, event_type="CHECKOUT_INITIATED")
+        db.commit()
+
+        return {"checkout_url": res.url}
+    except Exception as e:
+        print(f"Polar Error: {e}")
+        raise HTTPException(status_code=500, detail="Billing gateway unavailable.")
+
+from polar_sdk import WebhookVerificationError
+
+@app.post("/webhooks/polar", tags=["Billing"])
+async def polar_webhook(
+    request: Request, 
+    db: Session = Depends(get_db),
+    x_polar_signature: str = Header(None)
+):
+    payload = await request.body()
+    
+    # VERIFY SIGNATURE (Crucial for Security)
+    try:
+        # This ensures the request actually came from Polar
+        polar_client.webhooks.validate(
+            payload=payload,
+            signature=x_polar_signature,
+            secret=os.getenv("POLAR_WEBHOOK_SECRET")
+        )
+    except WebhookVerificationError:
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    event = json.loads(payload)
+    event_type = event.get("type")
+    data = event.get("data", {})
+
+    # Use 'order.created' or 'subscription.created' for Polar
+    if event_type in ["order.created", "subscription.created"]:
+        metadata = data.get("metadata", {})
+        user_id_str = metadata.get("user_id")
+
+        if user_id_str:
+            user_id = int(user_id_str)
+            # Activate in DB
+            activate_user_trial_db(db, user_id, data.get("customer_id"))
+            db.commit()
+            print(f"🚀 Neural Core activated for User {user_id}")
+
+    return {"status": "success"}
