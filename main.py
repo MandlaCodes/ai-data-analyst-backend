@@ -49,9 +49,6 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # --- Application Initialization ---
 app = FastAPI(title=API_TITLE)
-# ADD THIS: Initialize Polar Client
-from polar_sdk import Polar
-polar_client = Polar(access_token=os.environ.get("POLAR_ACCESS_TOKEN"))
 
 # -------------------- CORS Configuration --------------------
 origins = [
@@ -88,10 +85,6 @@ def on_startup():
         print(f"Database initialization FAILED: {e}")
 
 # -------------------- AI ANALYST SCHEMAS & UTILITIES --------------------
-
-class AIAnalysisRequest(BaseModel):
-    context: Union[dict, List[dict]]
-    mode: str = "single"
 
 class AIChatRequest(BaseModel):
     message: str
@@ -586,60 +579,83 @@ from db import activate_user_trial_db
 @app.post("/billing/start-trial", tags=["Billing"])
 async def start_trial(user: AuthUser, db: DBSession):
     try:
-        # Generate the checkout link
-        res = polar_client.checkouts.create(request={
-            "products": ["8cda6e5c-1c89-43ce-91e3-32ad1d18cfce"], 
-            "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
-            "customer_email": user.email,
-            "metadata": {
-                "user_id": str(user.id) # This links the payment to your DB user
-            }
-        })
-        
-        # Log the attempt
-        create_audit_log(db, user_id=user.id, event_type="CHECKOUT_INITIATED")
-        db.commit()
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.polar.sh/v1/checkouts/custom",
+                headers={
+                    "Authorization": f"Bearer {os.environ.get('POLAR_ACCESS_TOKEN')}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "product_id": "8cda6e5c-1c89-43ce-91e3-32ad1d18cfce",
+                    "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
+                    "customer_email": user.email,
+                    "metadata": {"user_id": str(user.id)}
+                }
+            )
+            
+            if response.status_code != 201:
+                print(f"Polar API Error: {response.text}")
+                raise HTTPException(status_code=500, detail="Checkout creation failed.")
 
-        return {"checkout_url": res.url}
+            res_data = response.json()
+            create_audit_log(db, user_id=user.id, event_type="CHECKOUT_INITIATED")
+            db.commit()
+
+            return {"checkout_url": res_data.get("url")}
+            
     except Exception as e:
-        print(f"Polar Error: {e}")
-        raise HTTPException(status_code=500, detail="Billing gateway unavailable.")
+        print(f"Connection Error: {e}")
+        raise HTTPException(status_code=500, detail="Billing gateway unreachable.")
 
-from polar_sdk import WebhookVerificationError
+# Replace everything from 'from polar_sdk import WebhookVerificationError' onwards with this:
+
+import hmac
+import hashlib
+from fastapi import Header
 
 @app.post("/webhooks/polar", tags=["Billing"])
 async def polar_webhook(
     request: Request, 
     db: Session = Depends(get_db),
-    x_polar_signature: str = Header(None)
+    x_polar_signature: Annotated[Union[str, None], Header()] = None
 ):
     payload = await request.body()
+    webhook_secret = os.getenv("POLAR_WEBHOOK_SECRET")
     
-    # VERIFY SIGNATURE (Crucial for Security)
-    try:
-        # This ensures the request actually came from Polar
-        polar_client.webhooks.validate(
-            payload=payload,
-            signature=x_polar_signature,
-            secret=os.getenv("POLAR_WEBHOOK_SECRET")
-        )
-    except WebhookVerificationError:
+    # 1. Verify Signature manually since SDK is removed
+    if not x_polar_signature or not webhook_secret:
+        raise HTTPException(status_code=401, detail="Missing signature or secret")
+
+    # Polar uses HMAC-SHA256 for verification
+    expected_signature = hmac.new(
+        webhook_secret.encode(),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, x_polar_signature):
+        print("❌ Invalid Polar Webhook Signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    event = json.loads(payload)
-    event_type = event.get("type")
-    data = event.get("data", {})
+    # 2. Process the event
+    try:
+        event = json.loads(payload)
+        event_type = event.get("type")
+        data = event.get("data", {})
 
-    # Use 'order.created' or 'subscription.created' for Polar
-    if event_type in ["order.created", "subscription.created"]:
-        metadata = data.get("metadata", {})
-        user_id_str = metadata.get("user_id")
+        if event_type in ["order.created", "subscription.created"]:
+            metadata = data.get("metadata", {})
+            user_id_str = metadata.get("user_id")
 
-        if user_id_str:
-            user_id = int(user_id_str)
-            # Activate in DB
-            activate_user_trial_db(db, user_id, data.get("customer_id"))
-            db.commit()
-            print(f"🚀 Neural Core activated for User {user_id}")
+            if user_id_str:
+                user_id = int(user_id_str)
+                # Activate in DB
+                activate_user_trial_db(db, user_id, data.get("customer_id"))
+                db.commit()
+                print(f"🚀 Neural Core activated for User {user_id}")
 
-    return {"status": "success"}
+        return {"status": "success"}
+    except Exception as e:
+        print(f"Webhook Processing Error: {e}")
+        return {"status": "error", "message": str(e)}
