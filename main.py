@@ -571,9 +571,6 @@ async def get_active_google_token(user_id: AuthUserID, db: DBSession):
 
 # --- BILLING & POLAR INTEGRATION ---
 
-# 1. Ensure activate_user_trial_db is in your db.py imports at the top!
-# Scroll to the top and make sure 'activate_user_trial_db' is added to: 
-# from db import (...)
 from db import activate_user_trial_db 
 
 @app.post("/billing/start-trial", tags=["Billing"])
@@ -582,14 +579,14 @@ async def start_trial(user: AuthUser, db: DBSession):
         async with httpx.AsyncClient() as client:
             # UPDATED ENDPOINT
             response = await client.post(
-                "https://api.polar.sh/v1/checkouts/", 
+                "https://sandbox-api.polar.sh/v1/checkouts/", 
                 headers={
                     "Authorization": f"Bearer {os.environ.get('POLAR_ACCESS_TOKEN')}",
                     "Content-Type": "application/json",
                     "Accept": "application/json"
                 },
                 json={
-                    "product_id": "8cda6e5c-1c89-43ce-91e3-32ad1d18cfce",
+                    "product_id": "3eed5287-491d-49a2-b27e-3d61a2a7f63f",
                     "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
                     "customer_email": user.email,
                     # Ensure metadata is flat strings for best compatibility
