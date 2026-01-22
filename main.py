@@ -568,6 +568,58 @@ async def get_active_google_token(user_id: AuthUserID, db: DBSession):
             raise HTTPException(status_code=401, detail="Token expired and no refresh token available.")
 
     return {"access_token": token_obj.access_token}
+# --- BILLING & CHECKOUT ---
+
+class CheckoutRequest(BaseModel):
+    product_id: str  # The Polar Product ID for your $10 plan
+
+@app.post("/billing/start-trial", tags=["Billing"])
+async def create_polar_checkout(
+    payload: CheckoutRequest, 
+    user: AuthUser, 
+    db: DBSession
+):
+    """
+    Creates a Polar Checkout session and returns the URL.
+    Attaches user_id to metadata so the webhook can identify them.
+    """
+    POLAR_API_TOKEN = os.getenv("POLAR_API_TOKEN") # Make sure this is in Render env
+    
+    if not POLAR_API_TOKEN:
+        raise HTTPException(status_code=500, detail="Billing engine not configured")
+
+    async with httpx.AsyncClient() as client_http:
+        try:
+            # We call the Polar API to create a checkout
+            response = await client_http.post(
+                "https://api.polar.sh/api/v1/checkouts/custom/",
+                headers={
+                    "Authorization": f"Bearer {POLAR_API_TOKEN}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "product_id": payload.product_id,
+                    "success_url": f"{FRONTEND_URL}/dashboard/overview?checkout=success",
+                    "customer_email": user.email,
+                    # CRITICAL: This links the payment to User 49
+                    "metadata": {
+                        "user_id": str(user.id)
+                    }
+                }
+            )
+            
+            if response.status_code != 201:
+                print(f"Polar Error: {response.text}")
+                raise HTTPException(status_code=400, detail="Could not initialize checkout")
+            
+            checkout_data = response.json()
+            # Return the URL to the frontend so it can redirect the user
+            return {"url": checkout_data["url"]}
+            
+        except Exception as e:
+            print(f"Checkout Exception: {e}")
+            raise HTTPException(status_code=500, detail="Billing uplink failed")
+        
 import hmac
 import hashlib
 import json
