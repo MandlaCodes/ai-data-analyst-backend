@@ -615,63 +615,74 @@ import os
 from fastapi import Request, HTTPException, Depends
 from sqlalchemy.orm import Session
 
+import hmac
+import hashlib
+import base64
+import json
+import os
+from fastapi import Request, HTTPException, Depends
+from sqlalchemy.orm import Session
+
 @app.post("/webhooks/polar", tags=["Billing"])
 async def polar_webhook(request: Request, db: Session = Depends(get_db)):
-    # 1. Get RAW body bytes
+    # 1. Get raw bytes and the specific Standard Webhook headers
     payload = await request.body()
-    
-    # 2. Get Signature Header
+    msg_id = request.headers.get("webhook-id")
+    msg_timestamp = request.headers.get("webhook-timestamp")
     signature_header = request.headers.get("webhook-signature")
+    
     webhook_secret = os.getenv("POLAR_WEBHOOK_SECRET", "").strip()
     
-    if not signature_header or not webhook_secret:
-        print(f"❌ Webhook Error: Sig header missing or Secret not in Env")
-        raise HTTPException(status_code=401, detail="Missing signature or secret")
+    if not all([msg_id, msg_timestamp, signature_header, webhook_secret]):
+        print("❌ Missing headers or Secret")
+        raise HTTPException(status_code=401, detail="Missing required headers")
 
-    # 3. Handle Polar's Versioned Signature (v1,hash)
+    # 2. Extract the actual Base64 hash from the header
     try:
-        if "," in signature_header:
-            # Splits 'v1,hash_value' and takes the hash_value
-            version, received_hash = signature_header.split(",", 1)
-        else:
-            received_hash = signature_header
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid signature format")
+        # Polar format: 'v1,base64_hash'
+        received_sig = signature_header.split(",")[1] if "," in signature_header else signature_header
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid signature header format")
 
-    # 4. Verify HMAC-SHA256
-    expected_hash = hmac.new(
+    # 3. Construct the signed message exactly as Polar expects
+    # Format: <msg_id>.<msg_timestamp>.<payload_bytes>
+    to_sign = f"{msg_id}.{msg_timestamp}.".encode("utf-8") + payload
+
+    # 4. Compute HMAC SHA256 (BINARY) and convert to BASE64
+    computed_hmac = hmac.new(
         webhook_secret.encode('utf-8'),
-        payload,
+        to_sign,
         hashlib.sha256
-    ).hexdigest()
+    ).digest() # Binary digest
+    
+    computed_sig = base64.b64encode(computed_hmac).decode('utf-8')
 
-    if not hmac.compare_digest(expected_hash, received_hash):
-        print(f"❌ Signature Mismatch")
-        print(f"Computed: {expected_hash[:6]}...")
-        print(f"Received: {received_hash[:6]}...")
+    # 5. Security Compare
+    if not hmac.compare_digest(computed_sig, received_sig):
+        print(f"❌ Signature Mismatch.")
+        print(f"Computed (Base64): {computed_sig[:10]}...")
+        print(f"Received (Base64): {received_sig[:10]}...")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # 5. Process the Event
+    print("✅ Webhook Signature Verified!")
+
+    # 6. Process the Event
     try:
         event = json.loads(payload)
-        event_type = event.get("type")
         data = event.get("data", {})
-
-        # We are listening for 'subscription.updated' as seen in your logs
-        if event_type in ["order.created", "subscription.created", "subscription.updated"]:
-            metadata = data.get("metadata", {})
-            user_id_str = metadata.get("user_id")
-
-            if user_id_str:
-                user_id = int(user_id_str)
-                # This updates is_trial_active and commits in db.py
-                success = activate_user_trial_db(db, user_id, data.get("customer_id"))
-                if success:
-                    print(f"🚀 Neural Core activated for User {user_id}")
-                else:
-                    print(f"⚠️ User {user_id} found in webhook but not in DB")
+        
+        # Check order or subscription events
+        if event.get("type") in ["order.created", "subscription.created", "subscription.updated"]:
+            # Pull user_id from metadata we set during checkout
+            user_id = data.get("metadata", {}).get("user_id")
+            if user_id:
+                activate_user_trial_db(db, int(user_id), data.get("customer_id"))
+                print(f"🚀 Neural Core activated for User {user_id}")
+            else:
+                print("⚠️ Webhook received but no user_id found in metadata")
 
         return {"status": "success"}
+
     except Exception as e:
-        print(f"Webhook Processing Error: {e}")
-        return {"status": "error", "message": str(e)}
+        print(f"Error processing webhook data: {e}")
+        raise HTTPException(status_code=400, detail="Data processing failed")
