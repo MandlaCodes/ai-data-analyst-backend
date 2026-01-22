@@ -569,15 +569,22 @@ async def get_active_google_token(user_id: AuthUserID, db: DBSession):
 
     return {"access_token": token_obj.access_token}
 
-# --- BILLING & POLAR INTEGRATION ---
+## --- BILLING & POLAR INTEGRATION ---
 
 from db import activate_user_trial_db 
+import hmac
+import hashlib
+import json
+import os
+import httpx
+from fastapi import Request, HTTPException, Depends
+from sqlalchemy.orm import Session
 
 @app.post("/billing/start-trial", tags=["Billing"])
 async def start_trial(user: AuthUser, db: DBSession):
     try:
         async with httpx.AsyncClient() as client:
-            # UPDATED ENDPOINT
+            # Pointing to Sandbox for free testing
             response = await client.post(
                 "https://sandbox-api.polar.sh/v1/checkouts/", 
                 headers={
@@ -589,12 +596,10 @@ async def start_trial(user: AuthUser, db: DBSession):
                     "product_id": "3eed5287-491d-49a2-b27e-3d61a2a7f63f",
                     "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
                     "customer_email": user.email,
-                    # Ensure metadata is flat strings for best compatibility
                     "metadata": {"user_id": str(user.id)} 
                 }
             )
             
-            # Polar returns 201 for Created
             if response.status_code not in [200, 201]:
                 print(f"Polar API Error ({response.status_code}): {response.text}")
                 raise HTTPException(status_code=response.status_code, detail=f"Polar Error: {response.text}")
@@ -605,73 +610,73 @@ async def start_trial(user: AuthUser, db: DBSession):
             create_audit_log(db, user_id=user.id, event_type="CHECKOUT_INITIATED")
             db.commit()
 
-            # Return the checkout URL
             return {"checkout_url": res_data.get("url")}
             
     except Exception as e:
-        print(f"System Error: {e}")
+        print(f"System Error in start_trial: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Replace everything from 'from polar_sdk import WebhookVerificationError' onwards with this:
+# --- WEBHOOK VERIFICATION BLOCK ---
 
-import hmac
-import hashlib
-from fastapi import Header
-
-import hmac
-import hashlib
-import json
-import os
-from fastapi import Request, HTTPException, Depends
-from sqlalchemy.orm import Session
 @app.post("/webhooks/polar", tags=["Billing"])
 async def polar_webhook(request: Request, db: Session = Depends(get_db)):
-    # 1. Get RAW body bytes
+    # 1. Get RAW body bytes (Crucial for HMAC math)
     payload = await request.body()
     
-    # 2. Polar usually sends 'webhook-signature' 
-    signature = request.headers.get("webhook-signature")
+    # 2. Get Signature Header & Secret
+    signature_header = request.headers.get("webhook-signature")
+    webhook_secret = os.getenv("POLAR_WEBHOOK_SECRET", "").strip()
     
-    # Get secret and strip any accidental whitespace/newlines from Render env
-    raw_secret = os.getenv("POLAR_WEBHOOK_SECRET", "")
-    webhook_secret = raw_secret.strip()
-    
-    if not signature or not webhook_secret:
-        print(f"❌ Webhook Error: Sig found: {bool(signature)}, Secret found: {bool(webhook_secret)}")
+    if not signature_header or not webhook_secret:
+        print(f"❌ Webhook Error: Sig header missing or Secret not in Env")
         raise HTTPException(status_code=401, detail="Missing signature or secret")
 
-    # 3. Verify HMAC-SHA256
-    # We must use .encode() on both the secret and the payload
-    expected_signature = hmac.new(
+    # 3. FIX: Handle Polar's Versioned Signature (v1,hash_value)
+    # This extracts only the hash after the 'v1,' prefix
+    try:
+        if "," in signature_header:
+            received_hash = signature_header.split(",")[1]
+        else:
+            received_hash = signature_header
+    except IndexError:
+        print("❌ Malformed signature header format")
+        raise HTTPException(status_code=401, detail="Invalid signature format")
+
+    # 4. Verify HMAC-SHA256
+    expected_hash = hmac.new(
         webhook_secret.encode('utf-8'),
         payload,
         hashlib.sha256
     ).hexdigest()
 
-    # Log first few characters for debugging (Safe to log first 4)
-    if not hmac.compare_digest(expected_signature, signature):
+    # 5. Compare the EXTRACTED hash
+    if not hmac.compare_digest(expected_hash, received_hash):
         print(f"❌ Signature Mismatch")
-        print(f"Computed starts with: {expected_signature[:4]}")
-        print(f"Received starts with: {signature[:4]}")
+        print(f"Computed (Local): {expected_hash[:8]}...")
+        print(f"Received (Extracted): {received_hash[:8]}...")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # 4. Process the Event
+    print("✅ Signature Match! Processing event...")
+
+    # 6. Process the Event
     try:
         event = json.loads(payload)
         event_type = event.get("type")
         data = event.get("data", {})
 
-        # subscription.updated is the one we saw in your Polar logs
+        # We listen for updated/created events to unlock the trial
         if event_type in ["order.created", "subscription.created", "subscription.updated"]:
-            # Note: For subscriptions, metadata is often inside the 'data' object
             metadata = data.get("metadata", {})
             user_id_str = metadata.get("user_id")
 
             if user_id_str:
                 user_id = int(user_id_str)
-                # Success! This calls your db.py function
-                activate_user_trial_db(db, user_id, data.get("customer_id"))
-                print(f"🚀 Neural Core activated for User {user_id}")
+                # This updates is_trial_active and commits in db.py
+                success = activate_user_trial_db(db, user_id, data.get("customer_id"))
+                if success:
+                    print(f"🚀 Neural Core activated for User {user_id}")
+                else:
+                    print(f"⚠️ Webhook received but User {user_id} not found in DB")
 
         return {"status": "success"}
     except Exception as e:
