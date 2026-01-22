@@ -624,47 +624,53 @@ import json
 import os
 from fastapi import Request, HTTPException, Depends
 from sqlalchemy.orm import Session
-
 @app.post("/webhooks/polar", tags=["Billing"])
 async def polar_webhook(request: Request, db: Session = Depends(get_db)):
+    # 1. Get RAW body bytes
     payload = await request.body()
-    webhook_secret = os.getenv("POLAR_WEBHOOK_SECRET")
     
-    # 1. Pull the signature directly to avoid conversion issues
-    # Polar sends this as 'webhook-signature'
+    # 2. Polar usually sends 'webhook-signature' 
     signature = request.headers.get("webhook-signature")
+    
+    # Get secret and strip any accidental whitespace/newlines from Render env
+    raw_secret = os.getenv("POLAR_WEBHOOK_SECRET", "")
+    webhook_secret = raw_secret.strip()
     
     if not signature or not webhook_secret:
         print(f"❌ Webhook Error: Sig found: {bool(signature)}, Secret found: {bool(webhook_secret)}")
         raise HTTPException(status_code=401, detail="Missing signature or secret")
 
-    # 2. Verify HMAC-SHA256
+    # 3. Verify HMAC-SHA256
+    # We must use .encode() on both the secret and the payload
     expected_signature = hmac.new(
-        webhook_secret.encode(),
+        webhook_secret.encode('utf-8'),
         payload,
         hashlib.sha256
     ).hexdigest()
 
+    # Log first few characters for debugging (Safe to log first 4)
     if not hmac.compare_digest(expected_signature, signature):
-        print("❌ Invalid Polar Webhook Signature Match")
+        print(f"❌ Signature Mismatch")
+        print(f"Computed starts with: {expected_signature[:4]}")
+        print(f"Received starts with: {signature[:4]}")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # 3. Process the Event
+    # 4. Process the Event
     try:
         event = json.loads(payload)
         event_type = event.get("type")
         data = event.get("data", {})
 
-        # ADDED 'subscription.updated' because your test payload used it
+        # subscription.updated is the one we saw in your Polar logs
         if event_type in ["order.created", "subscription.created", "subscription.updated"]:
+            # Note: For subscriptions, metadata is often inside the 'data' object
             metadata = data.get("metadata", {})
             user_id_str = metadata.get("user_id")
 
             if user_id_str:
                 user_id = int(user_id_str)
-                # Activate in DB
+                # Success! This calls your db.py function
                 activate_user_trial_db(db, user_id, data.get("customer_id"))
-                db.commit()
                 print(f"🚀 Neural Core activated for User {user_id}")
 
         return {"status": "success"}
