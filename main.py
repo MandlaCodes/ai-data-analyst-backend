@@ -618,37 +618,45 @@ import hmac
 import hashlib
 from fastapi import Header
 
+import hmac
+import hashlib
+import json
+import os
+from fastapi import Request, HTTPException, Depends
+from sqlalchemy.orm import Session
+
 @app.post("/webhooks/polar", tags=["Billing"])
-async def polar_webhook(
-    request: Request, 
-    db: Session = Depends(get_db),
-    x_polar_signature: Annotated[Union[str, None], Header()] = None
-):
+async def polar_webhook(request: Request, db: Session = Depends(get_db)):
     payload = await request.body()
     webhook_secret = os.getenv("POLAR_WEBHOOK_SECRET")
     
-    # 1. Verify Signature manually since SDK is removed
-    if not x_polar_signature or not webhook_secret:
+    # 1. Pull the signature directly to avoid conversion issues
+    # Polar sends this as 'webhook-signature'
+    signature = request.headers.get("webhook-signature")
+    
+    if not signature or not webhook_secret:
+        print(f"❌ Webhook Error: Sig found: {bool(signature)}, Secret found: {bool(webhook_secret)}")
         raise HTTPException(status_code=401, detail="Missing signature or secret")
 
-    # Polar uses HMAC-SHA256 for verification
+    # 2. Verify HMAC-SHA256
     expected_signature = hmac.new(
         webhook_secret.encode(),
         payload,
         hashlib.sha256
     ).hexdigest()
 
-    if not hmac.compare_digest(expected_signature, x_polar_signature):
-        print("❌ Invalid Polar Webhook Signature")
+    if not hmac.compare_digest(expected_signature, signature):
+        print("❌ Invalid Polar Webhook Signature Match")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # 2. Process the event
+    # 3. Process the Event
     try:
         event = json.loads(payload)
         event_type = event.get("type")
         data = event.get("data", {})
 
-        if event_type in ["order.created", "subscription.created"]:
+        # ADDED 'subscription.updated' because your test payload used it
+        if event_type in ["order.created", "subscription.created", "subscription.updated"]:
             metadata = data.get("metadata", {})
             user_id_str = metadata.get("user_id")
 
