@@ -277,7 +277,6 @@ class AIAnalysisRequest(BaseModel):
     # Add an alias so it works whether frontend sends 'strategy' or 'mode'
     strategy: Optional[str] = "standalone" 
     mode: Optional[str] = None
-
 # -------------------- RE-ENGINEERED ANALYZE ROUTE --------------------
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
@@ -286,45 +285,45 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     ind = user.industry if user.industry else "the current sector"
     exec_name = user.first_name if user.first_name else "Executive"
 
-    # --- STRATEGIC LOGIC INJECTION: PURE BUSINESS TERMINOLOGY ---
+    # --- STRATEGIC LOGIC INJECTION: ENHANCED FOR ACTIONABLE ANALYTICS ---
     if payload.strategy == "correlation":
         strategy_prompt = (
-            "MISSION: SYSTEM SYNERGY AUDIT. Your goal is to find out if Department A is sabotaging Department B. "
-            "Map the ripple effect: How does a win in one area trigger a failure in another? "
-            "TRUTH GUARDRAIL: If these datasets are unrelated, do not force a connection. "
-            "Instead, flag it as 'Operational Fragmentation'—the right hand doesn't know what the left is doing."
+            "MISSION: SYSTEM SYNERGY AUDIT. Map how resource spikes in one area impact performance in another. "
+            "Identify if aggressive KPI setting is causing cross-departmental friction. "
+            "Look for 'Lead-Lag' indicators where activity today predicts revenue in 90 days."
         )
-        trigger = "Analyze systemic ripple effects and operational overlap."
+        trigger = "Audit systemic ripple effects and identify hidden lead-lag correlations."
     elif payload.strategy == "compare":
         strategy_prompt = (
-            "MISSION: CAPITAL ALLOCATION BENCHMARKING. Rank these streams by financial density. "
-            "Identify the 'Growth Engine' that deserves more budget and the 'Value Sink' that is "
-            "bleeding resources. Contrast their efficiency without looking for causal links."
+            "MISSION: CAPITAL EFFICIENCY BENCHMARKING. Rank every sub-area by 'Execution Velocity' (Actuals vs KPIs). "
+            "Categorize locations as 'Growth Engines' (High Actuals), 'Zombie Markets' (High KPI, Zero Actuals), "
+            "or 'Efficiency Leaders' (Low Resource, High Output)."
         )
-        trigger = "Benchmark capital efficiency and rank performance tiers."
+        trigger = "Benchmark capital efficiency and segment performance tiers."
     else:  # Standalone
         strategy_prompt = (
-            "MISSION: P&L ISOLATION AUDIT. Treat this as a single-business deep dive. "
-            "Ignore all other noise. Focus exclusively on the internal mechanics, "
-            "tactical wins, and immediate threats of this specific stream."
+            "MISSION: PERFORMANCE VELOCITY AUDIT. Deep dive into the delta between projections and reality. "
+            "Analyze why specific months show zero output despite high targets. "
+            "Detect early signs of market saturation or operational bottlenecks."
         )
-        trigger = "Audit standalone business health and tactical failures."
+        trigger = "Audit execution velocity and identify tactical bottlenecks."
 
     system_prompt = (
         f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
         f"You are reporting to {exec_name}. {strategy_prompt} "
         "Respond ONLY in valid JSON. "
-        "LANGUAGE RULE: Avoid technical jargon like 'parameters', 'stochastic', or 'data points'. "
-        "Use executive power words: 'Revenue Leak', 'Strategic Friction', 'Growth Engine', 'Capital Risk'. "
+        "LANGUAGE RULE: Never use 'data points' or 'parameters'. Use 'Execution Velocity', 'Revenue Leak', 'Market Dormancy', and 'Capital Friction'. "
         "SENTENCE STRUCTURE RULE: Every reply in every JSON key must be exactly 3 sentences long. "
-        "CONSTRAINTS: If the data is junk or unrelated, call it a 'Visibility Gap'—never hallucinate. "
+        "TRUTH GUARDRAIL: If Actuals are 0 while KPIs are high, do NOT call it a 'Visibility Gap'. "
+        "Instead, diagnose it as 'Operational Lag' or 'Market Entry Failure'. "
         "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'."
     )
 
+    # Added a specific instruction to handle the 2026 KPI dataset format
     user_prompt = (
-        f"INPUT: {len(payload.context)} distinct business streams. "
+        f"INPUT: Analyze this dataset containing monthly KPIs vs Actuals for {len(payload.context)} areas. "
         f"Context: {json.dumps(payload.context)}. "
-        f"{trigger}"
+        f"Task: {trigger} Calculate the burn-to-goal ratio and identify which areas are failing the plan."
     )
 
     try:
@@ -337,8 +336,8 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
             
         return parsed_response
     except Exception as e:
-        # We use a generic error to keep the executive-facing side clean
-        raise HTTPException(status_code=500, detail="The Intelligence Engine encountered a visibility gap.")
+        # Fallback that still sounds professional but indicates a processing error
+        raise HTTPException(status_code=500, detail="The Strategic Engine is currently recalibrating for complex data structures.")
 
 @app.post("/ai/compare-trends", tags=["AI Analyst"])
 async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
