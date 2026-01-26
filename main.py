@@ -577,14 +577,14 @@ async def start_trial(user: AuthUser, db: DBSession):
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "https://sandbox-api.polar.sh/v1/checkouts/", 
+                "https://api.polar.sh/v1/checkouts/", 
                 headers={
                     "Authorization": f"Bearer {os.environ.get('POLAR_ACCESS_TOKEN')}",
                     "Content-Type": "application/json",
                     "Accept": "application/json"
                 },
                 json={
-                    "product_id": "3eed5287-491d-49a2-b27e-3d61a2a7f63f", # Updated to your Sandbox ID
+                    "product_id": "8cda6e5c-1c89-43ce-91e3-32ad1d18cfce",
                     "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
                     "customer_email": user.email,
                     "metadata": {"user_id": str(user.id)} 
