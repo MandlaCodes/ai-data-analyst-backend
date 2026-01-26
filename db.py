@@ -211,3 +211,10 @@ def get_audit_logs_db(db: Session, user_id: int, limit: int = 10) -> List[AuditL
 
 def get_tokens_metadata_db(db: Session, user_id: int) -> List[Token]:
     return db.query(Token).filter(Token.user_id == user_id).all()
+def deactivate_user_subscription_db(db: Session, user_id: int):
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.is_trial_active = False  # Or your specific subscription boolean
+        # user.polar_customer_id = None # Optional: keep for history or clear it
+        db.commit()
+    return user

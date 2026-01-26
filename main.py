@@ -22,7 +22,7 @@ from openai import AsyncOpenAI
 # Import all models, engine, and helper functions from db.py
 from db import (
     User, AuditLog, Dashboard, Settings, Token, StateToken,
-    Base, engine, SessionLocal,
+    Base, deactivate_user_subscription_db, engine, SessionLocal,
     get_user_by_email, create_user_db, create_audit_log,
     get_user_profile_db, get_latest_dashboard_db, get_user_settings_db,
     get_audit_logs_db, get_tokens_metadata_db, 
@@ -685,3 +685,54 @@ async def polar_webhook(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Error processing webhook data: {e}")
         raise HTTPException(status_code=400, detail="Data processing failed")
+    # --- CANCELLATION ENDPOINT ---
+
+@app.post("/payments/cancel", tags=["Billing"])
+async def cancel_subscription(user: AuthUser, db: DBSession):
+    """
+    Retrieves the user's active subscription from Polar and revokes it.
+    """
+    if not user.polar_customer_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="No active subscription record found for this account."
+        )
+
+    polar_key = os.environ.get('POLAR_ACCESS_TOKEN')
+    
+    async with httpx.AsyncClient() as client:
+        # 1. Fetch active subscriptions for this customer from Polar
+        # Polar allows multiple, but we fetch the most recent active one
+        sub_resp = await client.get(
+            f"https://api.polar.sh/v1/subscriptions/?customer_id={user.polar_customer_id}&active=true",
+            headers={"Authorization": f"Bearer {polar_key}"}
+        )
+
+        if sub_resp.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to reach billing server.")
+
+        subscriptions = sub_resp.json().get("items", [])
+        
+        if not subscriptions:
+            # If no active sub found on Polar, sync our DB to reflect that
+            deactivate_user_subscription_db(db, user.id)
+            return {"message": "No active subscription found on provider. Local status updated."}
+
+        # 2. Revoke the specific subscription
+        # We take the first active one found
+        subscription_id = subscriptions[0]["id"]
+        
+        revoke_resp = await client.post(
+            f"https://api.polar.sh/v1/subscriptions/{subscription_id}/revoke",
+            headers={"Authorization": f"Bearer {polar_key}"}
+        )
+
+        if revoke_resp.status_code in [200, 204, 201]:
+            # 3. Update local database
+            deactivate_user_subscription_db(db, user.id)
+            create_audit_log(db, user_id=user.id, event_type="SUBSCRIPTION_CANCELLED")
+            db.commit()
+            return {"status": "success", "message": "Subscription revoked successfully."}
+        else:
+            print(f"Polar Revoke Error: {revoke_resp.text}")
+            raise HTTPException(status_code=revoke_resp.status_code, detail="Provider failed to revoke subscription.")
