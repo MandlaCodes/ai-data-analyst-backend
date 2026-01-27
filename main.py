@@ -76,6 +76,7 @@ def get_db():
 
 DBSession = Annotated[Session, Depends(get_db)]
 
+
 @app.on_event("startup")
 def on_startup():
     try:
@@ -184,12 +185,27 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+class EmailCheckRequest(BaseModel):
+    email: EmailStr
 
 class ProfileUpdateRequest(BaseModel):
     first_name: Optional[str]
     last_name: Optional[str]
     organization: Optional[str]
     industry: Optional[str]
+    @app.post("/auth/check-email", tags=["Auth"])
+def check_email_availability(payload: EmailCheckRequest, db: DBSession):
+    """
+    Pre-flight check to see if an email is already registered.
+    Used by the multi-step signup form to catch errors early.
+    """
+    user = get_user_by_email(db, payload.email)
+    if user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, 
+            detail="This email is already linked to an account."
+        )
+    return {"status": "available", "message": "Email is clear to use."}
 
 @app.post("/auth/signup", tags=["Auth"])
 def signup(payload: UserCreate, db: DBSession, request: Request):
@@ -285,45 +301,45 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     ind = user.industry if user.industry else "the current sector"
     exec_name = user.first_name if user.first_name else "Executive"
 
-    # --- STRATEGIC LOGIC INJECTION: ENHANCED FOR ACTIONABLE ANALYTICS ---
+    # --- STRATEGIC LOGIC: PIVOTED FROM OBSERVATION TO COMMAND ---
     if payload.strategy == "correlation":
         strategy_prompt = (
-            "MISSION: SYSTEM SYNERGY AUDIT. Map how resource spikes in one area impact performance in another. "
-            "Identify if aggressive KPI setting is causing cross-departmental friction. "
-            "Look for 'Lead-Lag' indicators where activity today predicts revenue in 90 days."
+            "MISSION: SYSTEM SYNERGY COMMAND. Identify which markets are cannibalizing resources from others. "
+            "Expose hidden friction where high HHP markets are being starved of sub-area nodes. "
+            "Direct the shift of capital from low-velocity silos to high-growth clusters."
         )
-        trigger = "Audit systemic ripple effects and identify hidden lead-lag correlations."
+        trigger = "Execute synergy audit and command resource reallocation."
     elif payload.strategy == "compare":
         strategy_prompt = (
-            "MISSION: CAPITAL EFFICIENCY BENCHMARKING. Rank every sub-area by 'Execution Velocity' (Actuals vs KPIs). "
-            "Categorize locations as 'Growth Engines' (High Actuals), 'Zombie Markets' (High KPI, Zero Actuals), "
-            "or 'Efficiency Leaders' (Low Resource, High Output)."
+            "MISSION: CAPITAL EFFICIENCY ENFORCEMENT. Rank locations by Execution Velocity. "
+            "Identify 'Zombie Markets' with high HHP but zero actual output. "
+            "Command the immediate termination of underperforming expansion plans."
         )
-        trigger = "Benchmark capital efficiency and segment performance tiers."
+        trigger = "Enforce capital efficiency and terminate zero-velocity projects."
     else:  # Standalone
         strategy_prompt = (
-            "MISSION: PERFORMANCE VELOCITY AUDIT. Deep dive into the delta between projections and reality. "
-            "Analyze why specific months show zero output despite high targets. "
-            "Detect early signs of market saturation or operational bottlenecks."
+            "MISSION: OPERATIONAL STRIKE. Detect the precise point of failure in the execution chain. "
+            "Diagnose why markets with massive potential show zero sub-area activity. "
+            "Generate high-impact tactical pivots to recover lost revenue leaks."
         )
-        trigger = "Audit execution velocity and identify tactical bottlenecks."
+        trigger = "Execute operational strike and identify recovery pivots."
 
     system_prompt = (
         f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
         f"You are reporting to {exec_name}. {strategy_prompt} "
         "Respond ONLY in valid JSON. "
-        "LANGUAGE RULE: Never use 'data points' or 'parameters'. Use 'Execution Velocity', 'Revenue Leak', 'Market Dormancy', and 'Capital Friction'. "
+        "COMMAND_GUARDRAIL: Never use words like 'consider', 'should', 'monitor', or 'review'. "
+        "Use 'Execute', 'Reallocate', 'Pivot', 'Terminate', and 'Accelerate'. "
+        "LANGUAGE RULE: Use 'Execution Velocity', 'Revenue Leak', 'Market Dormancy', and 'Capital Friction'. "
         "SENTENCE STRUCTURE RULE: Every reply in every JSON key must be exactly 3 sentences long. "
-        "TRUTH GUARDRAIL: If Actuals are 0 while KPIs are high, do NOT call it a 'Visibility Gap'. "
-        "Instead, diagnose it as 'Operational Lag' or 'Market Entry Failure'. "
-        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'."
+        "TRUTH GUARDRAIL: If Actuals are 0 while KPIs/HHP are high, diagnose it as 'Market Entry Failure'. "
+        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence', 'directive'."
     )
 
-    # Added a specific instruction to handle the 2026 KPI dataset format
     user_prompt = (
-        f"INPUT: Analyze this dataset containing monthly KPIs vs Actuals for {len(payload.context)} areas. "
-        f"Context: {json.dumps(payload.context)}. "
-        f"Task: {trigger} Calculate the burn-to-goal ratio and identify which areas are failing the plan."
+        f"INPUT DATA: {json.dumps(payload.context)}. "
+        f"TASK: {trigger} Compare the HHP density to Sub-Area execution. "
+        "Identify exactly which area to pull resources from and which area to flood with capital."
     )
 
     try:
@@ -333,12 +349,15 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
         # Self-Correction to ensure the UI doesn't break
         if "executive_summary" in parsed_response and "summary" not in parsed_response:
             parsed_response["summary"] = parsed_response.pop("executive_summary")
+        
+        # Ensure the new 'directive' key exists for the frontend "Top Priority" card
+        if "directive" not in parsed_response:
+            parsed_response["directive"] = "Accelerate core market node expansion immediately to capture unoptimized HHP density."
             
         return parsed_response
     except Exception as e:
-        # Fallback that still sounds professional but indicates a processing error
+        print(f"Neural Engine Error: {e}")
         raise HTTPException(status_code=500, detail="The Strategic Engine is currently recalibrating for complex data structures.")
-
 @app.post("/ai/compare-trends", tags=["AI Analyst"])
 async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
     # Using your Dashboard model from db.py
@@ -736,3 +755,5 @@ async def cancel_subscription(user: AuthUser, db: DBSession):
         else:
             print(f"Polar Revoke Error: {revoke_resp.text}")
             raise HTTPException(status_code=revoke_resp.status_code, detail="Provider failed to revoke subscription.")
+        
+        
