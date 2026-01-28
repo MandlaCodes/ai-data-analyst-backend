@@ -28,8 +28,9 @@ from db import (
     get_audit_logs_db, get_tokens_metadata_db, 
     save_google_token, get_google_token, 
     save_state_to_db, get_user_id_from_state_db, delete_state_from_db,
-    verify_password_helper 
+    verify_password_helper , ChatSession
 )
+
 
 # --- Environment and Configuration ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "METRIA_SECURE_PHRASE_2025") 
@@ -837,3 +838,7 @@ async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: D
         db.rollback()
         print(f"Chat Synthesis/Persistence Error: {e}")
         raise HTTPException(status_code=500, detail="Neural link for conversation is unstable.")
+@app.get("/analysis/sessions", tags=["Analysis"])
+def get_chat_sessions(user_id: AuthUserID, db: DBSession):
+    sessions = db.query(ChatSession).filter(ChatSession.user_id == user_id).all()
+    return sessions
