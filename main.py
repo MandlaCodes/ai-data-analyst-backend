@@ -193,7 +193,7 @@ class ProfileUpdateRequest(BaseModel):
     last_name: Optional[str]
     organization: Optional[str]
     industry: Optional[str]
-    @app.post("/auth/check-email", tags=["Auth"])
+@app.post("/auth/check-email", tags=["Auth"])
 def check_email_availability(payload: EmailCheckRequest, db: DBSession):
     """
     Pre-flight check to see if an email is already registered.
