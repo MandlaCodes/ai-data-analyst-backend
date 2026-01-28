@@ -211,7 +211,7 @@ def check_email_availability(payload: EmailCheckRequest, db: DBSession):
 def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     user = create_user_db(
         db, 
         email=payload.email, 
@@ -222,11 +222,11 @@ def signup(payload: UserCreate, db: DBSession, request: Request):
         industry=payload.industry
     )
     db.commit() 
-    
+
     token = create_access_token({"sub": str(user.id)})
     create_audit_log(db, user_id=user.id, event_type="SIGNUP_SUCCESS", ip_address=request.client.host if request.client else "unknown")
     db.commit()
-    
+
     return { 
         "user_id": user.id, 
         "email": user.email, 
@@ -434,7 +434,7 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
         create_audit_log(db, user_id=user_id, event_type="GOOGLE_CONNECTED", ip_address=request.client.host if request.client else None)
         db.commit()
         return RedirectResponse(url=f"{FRONTEND_URL}{final_return_path}?connected=true")
-    
+
     return RedirectResponse(url=f"{FRONTEND_URL}{final_return_path}?connected=false&error=token_exchange_failed")
 
 # -------------------- GOOGLE API DATA FETCHING --------------------
@@ -465,7 +465,7 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
         headers = {"Authorization": f"Bearer {token_obj.access_token}"}
         params = {"q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false", "fields": "files(id, name)"}
         resp = await client_http.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
-        
+
         if resp.status_code == 401 and token_obj.refresh_token:
             r = await client_http.post("https://oauth2.googleapis.com/token", data={
                 "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
@@ -523,7 +523,7 @@ def get_analysis_trends(user_id: AuthUserID, db: DBSession):
             insight = data.get("ai_insight")
             if not insight and data.get("allDatasets"):
                 insight = data["allDatasets"][0].get("aiStorage")
-                
+
             if insight:
                 trends.append({
                     "id": s.id,
@@ -537,7 +537,7 @@ def get_analysis_trends(user_id: AuthUserID, db: DBSession):
                     "roi": insight.get("roi_impact"),
                     "confidence": insight.get("confidence")
                 })
-        except Exception as e: 
+        except Exception as e:
             print(f"Trend parsing error for ID {s.id}: {e}")
             continue
     return trends
@@ -589,7 +589,7 @@ async def get_active_google_token(user_id: AuthUserID, db: DBSession):
 
 ## --- BILLING & POLAR INTEGRATION ---
 
-from db import activate_user_trial_db 
+from db import activate_user_trial_db
 
 @app.post("/billing/start-trial", tags=["Billing"])
 async def start_trial(user: AuthUser, db: DBSession):
@@ -609,7 +609,7 @@ async def start_trial(user: AuthUser, db: DBSession):
                     "metadata": {"user_id": str(user.id)} 
                 }
             )
-            
+
             if response.status_code not in [200, 201]:
                 print(f"Polar API Error ({response.status_code}): {response.text}")
                 raise HTTPException(status_code=response.status_code, detail=f"Polar Error: {response.text}")
@@ -619,7 +619,7 @@ async def start_trial(user: AuthUser, db: DBSession):
             db.commit()
 
             return {"checkout_url": res_data.get("url")}
-            
+
     except Exception as e:
         print(f"System Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -648,9 +648,9 @@ async def polar_webhook(request: Request, db: Session = Depends(get_db)):
     msg_id = request.headers.get("webhook-id")
     msg_timestamp = request.headers.get("webhook-timestamp")
     signature_header = request.headers.get("webhook-signature")
-    
+
     webhook_secret = os.getenv("POLAR_WEBHOOK_SECRET", "").strip()
-    
+
     if not all([msg_id, msg_timestamp, signature_header, webhook_secret]):
         print("❌ Missing headers or Secret")
         raise HTTPException(status_code=401, detail="Missing required headers")
@@ -672,7 +672,7 @@ async def polar_webhook(request: Request, db: Session = Depends(get_db)):
         to_sign,
         hashlib.sha256
     ).digest() # Binary digest
-    
+
     computed_sig = base64.b64encode(computed_hmac).decode('utf-8')
 
     # 5. Security Compare
@@ -688,7 +688,7 @@ async def polar_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         event = json.loads(payload)
         data = event.get("data", {})
-        
+
         # Check order or subscription events
         if event.get("type") in ["order.created", "subscription.created", "subscription.updated"]:
             # Pull user_id from metadata we set during checkout
@@ -755,5 +755,85 @@ async def cancel_subscription(user: AuthUser, db: DBSession):
         else:
             print(f"Polar Revoke Error: {revoke_resp.text}")
             raise HTTPException(status_code=revoke_resp.status_code, detail="Provider failed to revoke subscription.")
+
+class ChatMessage(BaseModel):
+    role: str # 'user' or 'assistant'
+    content: str
+
+class AIChatHistoryRequest(BaseModel):
+    messages: List[ChatMessage]
+    context: Optional[dict] = None
+    dashboard_id: Optional[int] = None
+    session_id: Optional[int] = None # Frontend sends this if continuing a thread
+
+@app.post("/ai/chat", tags=["AI Analyst"])
+async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: DBSession):
+    """
+    Conversational endpoint for follow-up strategy questions.
+    Now persists every interaction to the ChatSession table.
+    """
+    org = user.organization or "the organization"
+    exec_name = user.first_name or "Executive"
+
+    system_instruction = (
+        f"You are the Lead Strategic Data Analyst at {org} reporting to {exec_name}. "
+        "Your tone is decisive, high-velocity, and command-oriented. "
+        "Avoid passive language. Use terms like 'Execution Velocity' and 'Revenue Leak'. "
+        "If context data is provided, use it to justify tactical pivots."
+    )
+
+    # 1. Prepare messages for OpenAI
+    api_messages = [{"role": "system", "content": system_instruction}]
+    
+    # Inject context into the user's latest message if it's a new session
+    current_messages = [msg.dict() for msg in payload.messages]
+    if payload.context and len(current_messages) > 0:
+        current_messages[-1]["content"] += f"\n[DATA CONTEXT: {json.dumps(payload.context)}]"
+
+    for msg in current_messages:
+        api_messages.append(msg)
+
+    try:
+        # 2. Call OpenAI
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=api_messages,
+            temperature=0.3
+        )
+        ai_response_text = response.choices[0].message.content
+
+        # 3. Persistence Logic: Save the conversation to the DB
+        full_history = payload.messages + [ChatMessage(role="assistant", content=ai_response_text)]
+        history_json = json.dumps([m.dict() for m in full_history])
+
+        if payload.session_id:
+            # Update existing thread
+            session = db.query(ChatSession).filter(
+                ChatSession.id == payload.session_id, 
+                ChatSession.user_id == user.id
+            ).first()
+            if session:
+                session.messages = history_json
+        else:
+            # Create a brand new session
+            session = ChatSession(
+                user_id=user.id,
+                dashboard_id=payload.dashboard_id,
+                thread_title=f"Strategy: {payload.messages[0].content[:30]}...",
+                messages=history_json
+            )
+            db.add(session)
         
-        
+        db.commit()
+        db.refresh(session)
+
+        return {
+            "message": ai_response_text, 
+            "session_id": session.id,
+            "thread_title": session.thread_title
+        }
+
+    except Exception as e:
+        db.rollback()
+        print(f"Chat Synthesis/Persistence Error: {e}")
+        raise HTTPException(status_code=500, detail="Neural link for conversation is unstable.")

@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from passlib.context import CryptContext
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint, func
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Mapped, mapped_column, Session
 import uuid 
 
@@ -52,6 +52,7 @@ class User(Base):
     settings = relationship("Settings", back_populates="user", uselist=False, cascade="all, delete-orphan")
     tokens = relationship("Token", back_populates="user", cascade="all, delete-orphan")
     state_tokens = relationship("StateToken", back_populates="user", cascade="all, delete-orphan")
+    chat_sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
 
 
 class AuditLog(Base):
@@ -76,6 +77,7 @@ class Dashboard(Base):
     last_accessed: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="dashboards")
+    chat_sessions = relationship("ChatSession", back_populates="dashboard")
 
 class Settings(Base):
     __tablename__ = "settings"
@@ -114,6 +116,22 @@ class StateToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc) + timedelta(minutes=10)) 
 
     user = relationship("User", back_populates="state_tokens")
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    dashboard_id: Mapped[Optional[int]] = mapped_column(ForeignKey("dashboards.id"), nullable=True)
+    
+    thread_title: Mapped[str] = mapped_column(String(255), default="Strategic Consultation")
+    messages: Mapped[str] = mapped_column(Text)  # JSON string of the message list
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="chat_sessions")
+    dashboard = relationship("Dashboard", back_populates="chat_sessions")
 
 
 # --- Helper Functions ---
@@ -211,10 +229,15 @@ def get_audit_logs_db(db: Session, user_id: int, limit: int = 10) -> List[AuditL
 
 def get_tokens_metadata_db(db: Session, user_id: int) -> List[Token]:
     return db.query(Token).filter(Token.user_id == user_id).all()
+
 def deactivate_user_subscription_db(db: Session, user_id: int):
     user = db.query(User).filter(User.id == user_id).first()
     if user:
-        user.is_trial_active = False  # Or your specific subscription boolean
-        # user.polar_customer_id = None # Optional: keep for history or clear it
+        user.is_trial_active = False 
         db.commit()
     return user
+
+def get_user_chat_history_db(db: Session, user_id: int, limit: int = 20) -> List[ChatSession]:
+    return db.query(ChatSession).filter(
+        ChatSession.user_id == user_id
+    ).order_by(ChatSession.updated_at.desc()).limit(limit).all()
