@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from passlib.context import CryptContext
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint, func
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Text, Boolean, UniqueConstraint, func, BigInteger
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Mapped, mapped_column, Session
 import uuid 
 
@@ -69,7 +69,8 @@ class AuditLog(Base):
 class Dashboard(Base):
     __tablename__ = "dashboards"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    # ID upgraded to BigInteger to handle JS timestamps
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     name: Mapped[str] = mapped_column(String)
     layout_data: Mapped[str] = mapped_column(Text) 
@@ -122,7 +123,8 @@ class ChatSession(Base):
     
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    dashboard_id: Mapped[Optional[int]] = mapped_column(ForeignKey("dashboards.id"), nullable=True)
+    # dashboard_id upgraded to BigInteger to match Dashboard.id
+    dashboard_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("dashboards.id"), nullable=True)
     
     thread_title: Mapped[str] = mapped_column(String(255), default="Strategic Consultation")
     messages: Mapped[str] = mapped_column(Text)  # JSON string of the message list
