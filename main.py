@@ -757,6 +757,12 @@ async def cancel_subscription(user: AuthUser, db: DBSession):
             print(f"Polar Revoke Error: {revoke_resp.text}")
             raise HTTPException(status_code=revoke_resp.status_code, detail="Provider failed to revoke subscription.")
 
+from typing import List, Optional
+import json
+from fastapi import HTTPException
+# Ensure Dashboard is imported from your db module
+# from db import Dashboard, ChatSession 
+
 class ChatMessage(BaseModel):
     role: str # 'user' or 'assistant'
     content: str
@@ -764,14 +770,14 @@ class ChatMessage(BaseModel):
 class AIChatHistoryRequest(BaseModel):
     messages: List[ChatMessage]
     context: Optional[dict] = None
-    dashboard_id: Optional[int] = None
-    session_id: Optional[int] = None # Frontend sends this if continuing a thread
+    dashboard_id: Optional[int] = None # Will accept BigInt from frontend
+    session_id: Optional[int] = None 
 
 @app.post("/ai/chat", tags=["AI Analyst"])
 async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: DBSession):
     """
-    Conversational endpoint for follow-up strategy questions.
-    Now persists every interaction to the ChatSession table.
+    Conversational endpoint with 'Referential Integrity Guard'.
+    Ensures chats save even if the dashboard_id is missing from the DB.
     """
     org = user.organization or "the organization"
     exec_name = user.first_name or "Executive"
@@ -786,8 +792,7 @@ async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: D
     # 1. Prepare messages for OpenAI
     api_messages = [{"role": "system", "content": system_instruction}]
     
-    # Inject context into the user's latest message if it's a new session
-    current_messages = [msg.dict() for msg in payload.messages]
+    current_messages = [msg.model_dump() for msg in payload.messages]
     if payload.context and len(current_messages) > 0:
         current_messages[-1]["content"] += f"\n[DATA CONTEXT: {json.dumps(payload.context)}]"
 
@@ -803,9 +808,18 @@ async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: D
         )
         ai_response_text = response.choices[0].message.content
 
-        # 3. Persistence Logic: Save the conversation to the DB
+        # 3. Persistence Logic: The Resilience Guard
         full_history = payload.messages + [ChatMessage(role="assistant", content=ai_response_text)]
-        history_json = json.dumps([m.dict() for m in full_history])
+        history_json = json.dumps([m.model_dump() for m in full_history])
+
+        # VALIDATION GATE: Check if dashboard exists before linking
+        valid_dashboard_id = None
+        if payload.dashboard_id:
+            db_dash = db.query(Dashboard).filter(Dashboard.id == payload.dashboard_id).first()
+            if db_dash:
+                valid_dashboard_id = payload.dashboard_id
+            else:
+                print(f"Warning: Dashboard {payload.dashboard_id} not found. Saving chat as orphaned.")
 
         if payload.session_id:
             # Update existing thread
@@ -815,11 +829,14 @@ async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: D
             ).first()
             if session:
                 session.messages = history_json
+                # Update dashboard link if it was missing
+                if valid_dashboard_id:
+                    session.dashboard_id = valid_dashboard_id
         else:
-            # Create a brand new session
+            # Create a brand new session with validated dashboard_id
             session = ChatSession(
                 user_id=user.id,
-                dashboard_id=payload.dashboard_id,
+                dashboard_id=valid_dashboard_id, 
                 thread_title=f"Strategy: {payload.messages[0].content[:30]}...",
                 messages=history_json
             )
@@ -836,9 +853,12 @@ async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: D
 
     except Exception as e:
         db.rollback()
-        print(f"Chat Synthesis/Persistence Error: {e}")
+        # Log the specific error to Render console for debugging
+        print(f"CRITICAL ERROR in /ai/chat: {str(e)}")
         raise HTTPException(status_code=500, detail="Neural link for conversation is unstable.")
+
 @app.get("/analysis/sessions", tags=["Analysis"])
 def get_chat_sessions(user_id: AuthUserID, db: DBSession):
-    sessions = db.query(ChatSession).filter(ChatSession.user_id == user_id).all()
+    # Returns all sessions, even those without a valid dashboard_id
+    sessions = db.query(ChatSession).filter(ChatSession.user_id == user_id).order_by(ChatSession.updated_at.desc()).all()
     return sessions
