@@ -325,16 +325,42 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
         )
         trigger = "Execute operational strike and identify recovery pivots."
 
-    system_prompt = (
-        f"You are the world's best Lead Strategic Data Analyst at {org}, specializing in {ind}. "
-        f"You are reporting to {exec_name}. {strategy_prompt} "
-        "Respond ONLY in valid JSON. "
-        "COMMAND_GUARDRAIL: Never use words like 'consider', 'should', 'monitor', or 'review'. "
-        "Use 'Execute', 'Reallocate', 'Pivot', 'Terminate', and 'Accelerate'. "
-        "LANGUAGE RULE: Use 'Execution Velocity', 'Revenue Leak', 'Market Dormancy', and 'Capital Friction'. "
-        "SENTENCE STRUCTURE RULE: Every reply in every JSON key must be exactly 3 sentences long. "
-        "TRUTH GUARDRAIL: If Actuals are 0 while KPIs/HHP are high, diagnose it as 'Market Entry Failure'. "
-        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence', 'directive'."
+    system_prompt = (f"""
+You are the Lead Strategic Data Analyst at {org}, reporting directly to {exec_name}.
+You replace a human Senior Data Analyst.
+
+ANALYSIS ORDER (MANDATORY):
+1. DATA INTEGRITY: Identify inconsistencies, missing values, naming conflicts.
+2. FINANCIAL TRUTH: Calculate revenue, cost, profit, margin, concentration risk.
+3. KPI FRAMEWORK: Derive performance indicators used by executives.
+4. DIAGNOSIS: Explain WHY results exist using business logic.
+5. RISK SURFACE: Identify failure modes and revenue leaks.
+6. OPPORTUNITY LEVERAGE: Identify the highest ROI actions.
+7. EXECUTIVE DIRECTIVE: Issue a decisive command.
+
+LANGUAGE RULES:
+- No speculation.
+- No generic advice.
+- No filler.
+
+COMMAND LANGUAGE (ONLY IN 'action' and 'directive'):
+Use: Execute, Reallocate, Pivot, Terminate, Accelerate.
+
+STRUCTURE RULE:
+Every key must contain EXACTLY 3 sentences.
+
+REQUIRED JSON KEYS:
+summary,
+root_cause,
+risk,
+opportunity,
+action,
+roi_impact,
+confidence,
+directive
+
+Respond ONLY in valid JSON.
+"""
     )
 
     user_prompt = (
@@ -785,7 +811,7 @@ async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: D
     system_instruction = (
         f"You are the Lead Strategic Data Analyst at {org} reporting to {exec_name}. "
         "Your tone is decisive, high-velocity, and command-oriented. "
-        "Avoid passive language. Use terms like 'Execution Velocity' and 'Revenue Leak'. "
+        "Answer like a human analyst in a strategy meeting "
         "If context data is provided, use it to justify tactical pivots."
     )
 
@@ -853,12 +879,12 @@ async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: D
 
     except Exception as e:
         db.rollback()
-        # Log the specific error to Render console for debugging
+     
         print(f"CRITICAL ERROR in /ai/chat: {str(e)}")
         raise HTTPException(status_code=500, detail="Neural link for conversation is unstable.")
 
 @app.get("/analysis/sessions", tags=["Analysis"])
 def get_chat_sessions(user_id: AuthUserID, db: DBSession):
-    # Returns all sessions, even those without a valid dashboard_id
+     
     sessions = db.query(ChatSession).filter(ChatSession.user_id == user_id).order_by(ChatSession.updated_at.desc()).all()
     return sessions
