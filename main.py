@@ -283,65 +283,69 @@ class AIAnalysisRequest(BaseModel):
 
 # -------------------- RE-ENGINEERED ANALYZE ROUTE --------------------
 
+# -------------------- RE-ENGINEERED ANALYZE ROUTE --------------------
+
 @app.post("/ai/analyze", tags=["AI Analyst"])
 async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession):
     org = user.organization if user.organization else "the organization"
     ind = user.industry if user.industry else "the current sector"
     exec_name = user.first_name if user.first_name else "Executive"
 
-    # --- STRATEGIC LOGIC INJECTION: PURE BUSINESS TERMINOLOGY ---
+    # --- UPDATED STRATEGIC LOGIC: REMOVED THE 'EXIT HATCH' ---
     if payload.strategy == "correlation":
         strategy_prompt = (
-            "MISSION: SYSTEM SYNERGY AUDIT. Your goal is to find out if Department A is sabotaging Department B. "
-            "Map the ripple effect: How does a win in one area trigger a failure in another? "
-            "TRUTH GUARDRAIL: If these datasets are unrelated, do not force a connection. "
-            "Instead, flag it as 'Operational Fragmentation'—the right hand doesn't know what the left is doing."
+            "MISSION: SYSTEM SYNERGY AUDIT. Analyze how different service lines interact. "
+            "Identify if Web Dev is fueling AI Consultation or if they are competing for resources."
         )
         trigger = "Analyze systemic ripple effects and operational overlap."
     elif payload.strategy == "compare":
         strategy_prompt = (
-            "MISSION: CAPITAL ALLOCATION BENCHMARKING. Rank these streams by financial density. "
-            "Identify the 'Growth Engine' that deserves more budget and the 'Value Sink' that is "
-            "bleeding resources. Contrast their efficiency without looking for causal links."
+            "MISSION: CAPITAL ALLOCATION BENCHMARKING. Compare project ROI. "
+            "Identify which client (Annah, Justin, Sadie) provides the highest margin per effort."
         )
         trigger = "Benchmark capital efficiency and rank performance tiers."
     else:  # Standalone
         strategy_prompt = (
-            "MISSION: P&L ISOLATION AUDIT. Treat this as a single-business deep dive. "
-            "Ignore all other noise. Focus exclusively on the internal mechanics, "
-            "tactical wins, and immediate threats of this specific stream."
+            "MISSION: P&L ISOLATION AUDIT. Deep dive into this specific project list. "
+            "Calculate total margins, identify the most expensive service, and suggest price optimizations."
         )
         trigger = "Audit standalone business health and tactical failures."
 
+    # --- THE FIX: We are removing the "Call it a Visibility Gap" instruction ---
+    # We are replacing it with "Extract and Calculate" instructions.
     system_prompt = (
         f"You are the Lead Strategic Data Analyst at {org}, specializing in {ind}. "
         f"You are reporting to {exec_name}. {strategy_prompt} "
         "Respond ONLY in valid JSON. "
-        "LANGUAGE RULE: Avoid technical jargon like 'parameters', 'stochastic', or 'data points'. "
-        "Use executive power words: 'Revenue Leak', 'Strategic Friction', 'Growth Engine', 'Capital Risk'. "
-        "CONSTRAINTS: If the data is junk or unrelated, call it a 'Visibility Gap'—never hallucinate. "
+        "INSTRUCTION: You will be provided with raw project data (Income, Expense, Profit). "
+        "You MUST calculate the Total Revenue, Total Profit, and Margin % before responding. "
+        "If you see currency like 'R2000', treat it as the number 2000. "
+        "LANGUAGE RULE: Use executive power words: 'Revenue Leak', 'Strategic Friction', 'Growth Engine'. "
+        "DO NOT use the phrase 'Visibility Gap' if there is data present. Work with the numbers provided."
         "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'."
     )
 
+    # Ensure context is formatted for the AI to read easily
+    context_data = json.dumps(payload.context, indent=2)
+
     user_prompt = (
-        f"INPUT: {len(payload.context)} distinct business streams. "
-        f"Context: {json.dumps(payload.context)}. "
-        f"{trigger}"
+        f"EXECUTIVE DATA FEED: \n{context_data}\n\n"
+        f"TASK: {trigger} Analyze the specific clients and service types mentioned in the feed."
     )
 
     try:
         raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
         parsed_response = json.loads(raw_ai_response)
         
-        # Self-Correction to ensure the UI doesn't break
-        if "executive_summary" in parsed_response and "summary" not in parsed_response:
+        # Clean up keys for the frontend
+        if "executive_summary" in parsed_response:
             parsed_response["summary"] = parsed_response.pop("executive_summary")
             
         return parsed_response
     except Exception as e:
-        # We use a generic error to keep the executive-facing side clean
-        raise HTTPException(status_code=500, detail="The Intelligence Engine encountered a visibility gap.")
-
+        # Provide a more descriptive error for debugging (you can hide this later)
+        print(f"DEBUG ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail="The Intelligence Engine is processing a complex data structure. Please retry.")
 @app.post("/ai/compare-trends", tags=["AI Analyst"])
 async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
     # Using your Dashboard model from db.py
