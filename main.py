@@ -22,14 +22,15 @@ from openai import AsyncOpenAI
 # Import all models, engine, and helper functions from db.py
 from db import (
     User, AuditLog, Dashboard, Settings, Token, StateToken,
-    Base, engine, SessionLocal,
+    Base, deactivate_user_subscription_db, engine, SessionLocal,
     get_user_by_email, create_user_db, create_audit_log,
     get_user_profile_db, get_latest_dashboard_db, get_user_settings_db,
     get_audit_logs_db, get_tokens_metadata_db, 
     save_google_token, get_google_token, 
     save_state_to_db, get_user_id_from_state_db, delete_state_from_db,
-    verify_password_helper 
+    verify_password_helper , ChatSession
 )
+
 
 # --- Environment and Configuration ---
 SECRET_KEY = os.environ.get("SECRET_KEY", "METRIA_SECURE_PHRASE_2025") 
@@ -76,6 +77,7 @@ def get_db():
 
 DBSession = Annotated[Session, Depends(get_db)]
 
+
 @app.on_event("startup")
 def on_startup():
     try:
@@ -85,10 +87,6 @@ def on_startup():
         print(f"Database initialization FAILED: {e}")
 
 # -------------------- AI ANALYST SCHEMAS & UTILITIES --------------------
-
-class AIAnalysisRequest(BaseModel):
-    context: Union[dict, List[dict]]
-    mode: str = "single"
 
 class AIChatRequest(BaseModel):
     message: str
@@ -188,18 +186,33 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+class EmailCheckRequest(BaseModel):
+    email: EmailStr
 
 class ProfileUpdateRequest(BaseModel):
     first_name: Optional[str]
     last_name: Optional[str]
     organization: Optional[str]
     industry: Optional[str]
+@app.post("/auth/check-email", tags=["Auth"])
+def check_email_availability(payload: EmailCheckRequest, db: DBSession):
+    """
+    Pre-flight check to see if an email is already registered.
+    Used by the multi-step signup form to catch errors early.
+    """
+    user = get_user_by_email(db, payload.email)
+    if user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, 
+            detail="This email is already linked to an account."
+        )
+    return {"status": "available", "message": "Email is clear to use."}
 
 @app.post("/auth/signup", tags=["Auth"])
 def signup(payload: UserCreate, db: DBSession, request: Request):
     if get_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     user = create_user_db(
         db, 
         email=payload.email, 
@@ -210,11 +223,11 @@ def signup(payload: UserCreate, db: DBSession, request: Request):
         industry=payload.industry
     )
     db.commit() 
-    
+
     token = create_access_token({"sub": str(user.id)})
     create_audit_log(db, user_id=user.id, event_type="SIGNUP_SUCCESS", ip_address=request.client.host if request.client else "unknown")
     db.commit()
-    
+
     return { 
         "user_id": user.id, 
         "email": user.email, 
@@ -254,6 +267,7 @@ def me(user: AuthUser):
     return { 
         "user_id": user.id, 
         "email": user.email,
+        "is_trial_active": user.is_trial_active, # This tells the frontend to hide the paywall
         "first_name": user.first_name,
         "last_name": user.last_name,
         "organization": user.organization,
@@ -280,9 +294,6 @@ class AIAnalysisRequest(BaseModel):
     # Add an alias so it works whether frontend sends 'strategy' or 'mode'
     strategy: Optional[str] = "standalone" 
     mode: Optional[str] = None
-
-# -------------------- RE-ENGINEERED ANALYZE ROUTE --------------------
-
 # -------------------- RE-ENGINEERED ANALYZE ROUTE --------------------
 
 @app.post("/ai/analyze", tags=["AI Analyst"])
@@ -291,61 +302,100 @@ async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession
     ind = user.industry if user.industry else "the current sector"
     exec_name = user.first_name if user.first_name else "Executive"
 
-    # --- UPDATED STRATEGIC LOGIC: REMOVED THE 'EXIT HATCH' ---
+    # --- STRATEGIC LOGIC: PIVOTED FROM OBSERVATION TO COMMAND ---
     if payload.strategy == "correlation":
         strategy_prompt = (
-            "MISSION: SYSTEM SYNERGY AUDIT. Analyze how different service lines interact. "
-            "Identify if Web Dev is fueling AI Consultation or if they are competing for resources."
+            "MISSION: SYSTEM SYNERGY COMMAND. Identify which markets are cannibalizing resources from others. "
+            "Expose hidden friction where high HHP markets are being starved of sub-area nodes. "
+            "Direct the shift of capital from low-velocity silos to high-growth clusters."
         )
-        trigger = "Analyze systemic ripple effects and operational overlap."
+        trigger = "Execute synergy audit and command resource reallocation."
     elif payload.strategy == "compare":
         strategy_prompt = (
-            "MISSION: CAPITAL ALLOCATION BENCHMARKING. Compare project ROI. "
-            "Identify which client (Annah, Justin, Sadie) provides the highest margin per effort."
+            "MISSION: CAPITAL EFFICIENCY ENFORCEMENT. Rank locations by Execution Velocity. "
+            "Identify 'Zombie Markets' with high HHP but zero actual output. "
+            "Command the immediate termination of underperforming expansion plans."
         )
-        trigger = "Benchmark capital efficiency and rank performance tiers."
+        trigger = "Enforce capital efficiency and terminate zero-velocity projects."
     else:  # Standalone
         strategy_prompt = (
-            "MISSION: P&L ISOLATION AUDIT. Deep dive into this specific project list. "
-            "Calculate total margins, identify the most expensive service, and suggest price optimizations."
+            "MISSION: OPERATIONAL STRIKE. Detect the precise point of failure in the execution chain. "
+            "Diagnose why markets with massive potential show zero sub-area activity. "
+            "Generate high-impact tactical pivots to recover lost revenue leaks."
         )
-        trigger = "Audit standalone business health and tactical failures."
+        trigger = "Execute operational strike and identify recovery pivots."
 
-    # --- THE FIX: We are removing the "Call it a Visibility Gap" instruction ---
-    # We are replacing it with "Extract and Calculate" instructions.
-    system_prompt = (
-        f"You are the Lead Strategic Data Analyst at {org}, specializing in {ind}. "
-        f"You are reporting to {exec_name}. {strategy_prompt} "
-        "Respond ONLY in valid JSON. "
-        "INSTRUCTION: You will be provided with raw project data (Income, Expense, Profit). "
-        "You MUST calculate the Total Revenue, Total Profit, and Margin % before responding. "
-        "If you see currency like 'R2000', treat it as the number 2000. "
-        "LANGUAGE RULE: Use executive power words: 'Revenue Leak', 'Strategic Friction', 'Growth Engine'. "
-        "DO NOT use the phrase 'Visibility Gap' if there is data present. Work with the numbers provided."
-        "REQUIRED KEYS: 'summary', 'root_cause', 'risk', 'opportunity', 'action', 'roi_impact', 'confidence'."
-    )
+        system_prompt = f"""
+        You are the world's most elite Chief Data & Strategy Officer embedded inside {org}, operating within the {ind} sector.
 
-    # Ensure context is formatted for the AI to read easily
-    context_data = json.dumps(payload.context, indent=2)
+        You are reporting directly to {exec_name}.
+
+        MISSION:
+        Transform raw business data into executive-level intelligence.
+
+        RULES:
+        - Respond ONLY in valid JSON.
+        - Every key must contain exactly 3 sentences.
+        - No passive language.
+        - No filler.
+        - Diagnose performance using financial, operational, and capital efficiency lenses.
+        - If revenue is volatile, classify as 'Cashflow Instability'.
+        - If revenue is concentrated in one client or segment, classify as 'Customer Concentration Risk'.
+        - If margins are high but growth is slow, classify as 'Underleveraged Profit Engine'.
+        - If growth is high but profit is low, classify as 'Capital Inefficiency'.
+
+        LANGUAGE:
+        Use executive terminology such as:
+        - Revenue Velocity
+        - Margin Compression
+        - Capital Allocation
+        - Execution Friction
+        - Cashflow Volatility
+        - Pricing Power
+        - Operational Leverage
+        - Strategic Moat
+        - Revenue Concentration
+        - Scale Potential
+
+        REQUIRED_KEYS:
+        'summary',
+        'performance_diagnosis',
+        'financial_health',
+        'growth_vector',
+        'capital_efficiency',
+        'risk_exposure',
+        'cashflow_stability',
+        'customer_concentration',
+        'operational_leverage',
+        'pricing_power',
+        'action_plan',
+        'strategic_priority',
+        'roi_projection',
+        'confidence_score'
+        """
 
     user_prompt = (
-        f"EXECUTIVE DATA FEED: \n{context_data}\n\n"
-        f"TASK: {trigger} Analyze the specific clients and service types mentioned in the feed."
+        f"INPUT DATA: {json.dumps(payload.context)}. "
+        f"TASK: {trigger} Compare the HHP density to Sub-Area execution. "
+        "Identify exactly which area to pull resources from and which area to flood with capital."
     )
 
     try:
         raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
         parsed_response = json.loads(raw_ai_response)
         
-        # Clean up keys for the frontend
-        if "executive_summary" in parsed_response:
+        # Self-Correction to ensure the UI doesn't break
+        if "executive_summary" in parsed_response and "summary" not in parsed_response:
             parsed_response["summary"] = parsed_response.pop("executive_summary")
+        
+        # Ensure the new 'directive' key exists for the frontend "Top Priority" card
+        if "directive" not in parsed_response:
+            parsed_response["directive"] = "Accelerate core market node expansion immediately to capture unoptimized HHP density."
             
         return parsed_response
     except Exception as e:
-        # Provide a more descriptive error for debugging (you can hide this later)
-        print(f"DEBUG ERROR: {str(e)}")
-        raise HTTPException(status_code=500, detail="The Intelligence Engine is processing a complex data structure. Please retry.")
+        print(f"Neural Engine Error: {e}")
+        raise HTTPException(status_code=500, detail="The Strategic Engine is currently recalibrating for complex data structures.")
 @app.post("/ai/compare-trends", tags=["AI Analyst"])
 async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
     # Using your Dashboard model from db.py
@@ -422,7 +472,7 @@ async def google_oauth_callback(code: str, state: str, db: DBSession, request: R
         create_audit_log(db, user_id=user_id, event_type="GOOGLE_CONNECTED", ip_address=request.client.host if request.client else None)
         db.commit()
         return RedirectResponse(url=f"{FRONTEND_URL}{final_return_path}?connected=true")
-    
+
     return RedirectResponse(url=f"{FRONTEND_URL}{final_return_path}?connected=false&error=token_exchange_failed")
 
 # -------------------- GOOGLE API DATA FETCHING --------------------
@@ -453,7 +503,7 @@ async def list_google_sheets(user_id: AuthUserID, db: DBSession):
         headers = {"Authorization": f"Bearer {token_obj.access_token}"}
         params = {"q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false", "fields": "files(id, name)"}
         resp = await client_http.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
-        
+
         if resp.status_code == 401 and token_obj.refresh_token:
             r = await client_http.post("https://oauth2.googleapis.com/token", data={
                 "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
@@ -511,7 +561,7 @@ def get_analysis_trends(user_id: AuthUserID, db: DBSession):
             insight = data.get("ai_insight")
             if not insight and data.get("allDatasets"):
                 insight = data["allDatasets"][0].get("aiStorage")
-                
+
             if insight:
                 trends.append({
                     "id": s.id,
@@ -525,7 +575,7 @@ def get_analysis_trends(user_id: AuthUserID, db: DBSession):
                     "roi": insight.get("roi_impact"),
                     "confidence": insight.get("confidence")
                 })
-        except Exception as e: 
+        except Exception as e:
             print(f"Trend parsing error for ID {s.id}: {e}")
             continue
     return trends
@@ -574,3 +624,278 @@ async def get_active_google_token(user_id: AuthUserID, db: DBSession):
             raise HTTPException(status_code=401, detail="Token expired and no refresh token available.")
 
     return {"access_token": token_obj.access_token}
+
+## --- BILLING & POLAR INTEGRATION ---
+
+from db import activate_user_trial_db
+
+@app.post("/billing/start-trial", tags=["Billing"])
+async def start_trial(user: AuthUser, db: DBSession):
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.polar.sh/v1/checkouts/", 
+                headers={
+                    "Authorization": f"Bearer {os.environ.get('POLAR_ACCESS_TOKEN')}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                json={
+                    "product_id": "8cda6e5c-1c89-43ce-91e3-32ad1d18cfce",
+                    "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
+                    "customer_email": user.email,
+                    "metadata": {"user_id": str(user.id)} 
+                }
+            )
+
+            if response.status_code not in [200, 201]:
+                print(f"Polar API Error ({response.status_code}): {response.text}")
+                raise HTTPException(status_code=response.status_code, detail=f"Polar Error: {response.text}")
+
+            res_data = response.json()
+            create_audit_log(db, user_id=user.id, event_type="CHECKOUT_INITIATED")
+            db.commit()
+
+            return {"checkout_url": res_data.get("url")}
+
+    except Exception as e:
+        print(f"System Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- WEBHOOK VERIFICATION BLOCK ---
+
+import hmac
+import hashlib
+import json
+import os
+from fastapi import Request, HTTPException, Depends
+from sqlalchemy.orm import Session
+
+import hmac
+import hashlib
+import base64
+import json
+import os
+from fastapi import Request, HTTPException, Depends
+from sqlalchemy.orm import Session
+
+@app.post("/webhooks/polar", tags=["Billing"])
+async def polar_webhook(request: Request, db: Session = Depends(get_db)):
+    # 1. Get raw bytes and the specific Standard Webhook headers
+    payload = await request.body()
+    msg_id = request.headers.get("webhook-id")
+    msg_timestamp = request.headers.get("webhook-timestamp")
+    signature_header = request.headers.get("webhook-signature")
+
+    webhook_secret = os.getenv("POLAR_WEBHOOK_SECRET", "").strip()
+
+    if not all([msg_id, msg_timestamp, signature_header, webhook_secret]):
+        print("❌ Missing headers or Secret")
+        raise HTTPException(status_code=401, detail="Missing required headers")
+
+    # 2. Extract the actual Base64 hash from the header
+    try:
+        # Polar format: 'v1,base64_hash'
+        received_sig = signature_header.split(",")[1] if "," in signature_header else signature_header
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid signature header format")
+
+    # 3. Construct the signed message exactly as Polar expects
+    # Format: <msg_id>.<msg_timestamp>.<payload_bytes>
+    to_sign = f"{msg_id}.{msg_timestamp}.".encode("utf-8") + payload
+
+    # 4. Compute HMAC SHA256 (BINARY) and convert to BASE64
+    computed_hmac = hmac.new(
+        webhook_secret.encode('utf-8'),
+        to_sign,
+        hashlib.sha256
+    ).digest() # Binary digest
+
+    computed_sig = base64.b64encode(computed_hmac).decode('utf-8')
+
+    # 5. Security Compare
+    if not hmac.compare_digest(computed_sig, received_sig):
+        print(f"❌ Signature Mismatch.")
+        print(f"Computed (Base64): {computed_sig[:10]}...")
+        print(f"Received (Base64): {received_sig[:10]}...")
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    print("✅ Webhook Signature Verified!")
+
+    # 6. Process the Event
+    try:
+        event = json.loads(payload)
+        data = event.get("data", {})
+
+        # Check order or subscription events
+        if event.get("type") in ["order.created", "subscription.created", "subscription.updated"]:
+            # Pull user_id from metadata we set during checkout
+            user_id = data.get("metadata", {}).get("user_id")
+            if user_id:
+                activate_user_trial_db(db, int(user_id), data.get("customer_id"))
+                print(f"🚀 Neural Core activated for User {user_id}")
+            else:
+                print("⚠️ Webhook received but no user_id found in metadata")
+
+        return {"status": "success"}
+
+    except Exception as e:
+        print(f"Error processing webhook data: {e}")
+        raise HTTPException(status_code=400, detail="Data processing failed")
+    # --- CANCELLATION ENDPOINT ---
+
+@app.post("/payments/cancel", tags=["Billing"])
+async def cancel_subscription(user: AuthUser, db: DBSession):
+    """
+    Retrieves the user's active subscription from Polar and revokes it.
+    """
+    if not user.polar_customer_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="No active subscription record found for this account."
+        )
+
+    polar_key = os.environ.get('POLAR_ACCESS_TOKEN')
+    
+    async with httpx.AsyncClient() as client:
+        # 1. Fetch active subscriptions for this customer from Polar
+        # Polar allows multiple, but we fetch the most recent active one
+        sub_resp = await client.get(
+            f"https://api.polar.sh/v1/subscriptions/?customer_id={user.polar_customer_id}&active=true",
+            headers={"Authorization": f"Bearer {polar_key}"}
+        )
+
+        if sub_resp.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to reach billing server.")
+
+        subscriptions = sub_resp.json().get("items", [])
+        
+        if not subscriptions:
+            # If no active sub found on Polar, sync our DB to reflect that
+            deactivate_user_subscription_db(db, user.id)
+            return {"message": "No active subscription found on provider. Local status updated."}
+
+        # 2. Revoke the specific subscription
+        # We take the first active one found
+        subscription_id = subscriptions[0]["id"]
+        
+        revoke_resp = await client.post(
+            f"https://api.polar.sh/v1/subscriptions/{subscription_id}/revoke",
+            headers={"Authorization": f"Bearer {polar_key}"}
+        )
+
+        if revoke_resp.status_code in [200, 204, 201]:
+            # 3. Update local database
+            deactivate_user_subscription_db(db, user.id)
+            create_audit_log(db, user_id=user.id, event_type="SUBSCRIPTION_CANCELLED")
+            db.commit()
+            return {"status": "success", "message": "Subscription revoked successfully."}
+        else:
+            print(f"Polar Revoke Error: {revoke_resp.text}")
+            raise HTTPException(status_code=revoke_resp.status_code, detail="Provider failed to revoke subscription.")
+
+from typing import List, Optional
+import json
+from fastapi import HTTPException
+# Ensure Dashboard is imported from your db module
+# from db import Dashboard, ChatSession 
+
+class ChatMessage(BaseModel):
+    role: str # 'user' or 'assistant'
+    content: str
+
+class AIChatHistoryRequest(BaseModel):
+    messages: List[ChatMessage]
+    context: Optional[dict] = None
+    dashboard_id: Optional[int] = None # Will accept BigInt from frontend
+    session_id: Optional[int] = None 
+
+@app.post("/ai/chat", tags=["AI Analyst"])
+async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: DBSession):
+    """
+    Conversational endpoint with 'Referential Integrity Guard'.
+    Ensures chats save even if the dashboard_id is missing from the DB.
+    """
+    org = user.organization or "the organization"
+    exec_name = user.first_name or "Executive"
+
+    system_instruction = (
+        f"You are the Lead Strategic Data Analyst at {org} reporting to {exec_name}. "
+        "Your tone is decisive, high-velocity, and command-oriented. "
+        "Avoid passive language. Use terms like 'Execution Velocity' and 'Revenue Leak'. "
+        "If context data is provided, use it to justify tactical pivots."
+    )
+
+    # 1. Prepare messages for OpenAI
+    api_messages = [{"role": "system", "content": system_instruction}]
+    
+    current_messages = [msg.model_dump() for msg in payload.messages]
+    if payload.context and len(current_messages) > 0:
+        current_messages[-1]["content"] += f"\n[DATA CONTEXT: {json.dumps(payload.context)}]"
+
+    for msg in current_messages:
+        api_messages.append(msg)
+
+    try:
+        # 2. Call OpenAI
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=api_messages,
+            temperature=0.3
+        )
+        ai_response_text = response.choices[0].message.content
+
+        # 3. Persistence Logic: The Resilience Guard
+        full_history = payload.messages + [ChatMessage(role="assistant", content=ai_response_text)]
+        history_json = json.dumps([m.model_dump() for m in full_history])
+
+        # VALIDATION GATE: Check if dashboard exists before linking
+        valid_dashboard_id = None
+        if payload.dashboard_id:
+            db_dash = db.query(Dashboard).filter(Dashboard.id == payload.dashboard_id).first()
+            if db_dash:
+                valid_dashboard_id = payload.dashboard_id
+            else:
+                print(f"Warning: Dashboard {payload.dashboard_id} not found. Saving chat as orphaned.")
+
+        if payload.session_id:
+            # Update existing thread
+            session = db.query(ChatSession).filter(
+                ChatSession.id == payload.session_id, 
+                ChatSession.user_id == user.id
+            ).first()
+            if session:
+                session.messages = history_json
+                # Update dashboard link if it was missing
+                if valid_dashboard_id:
+                    session.dashboard_id = valid_dashboard_id
+        else:
+            # Create a brand new session with validated dashboard_id
+            session = ChatSession(
+                user_id=user.id,
+                dashboard_id=valid_dashboard_id, 
+                thread_title=f"Strategy: {payload.messages[0].content[:30]}...",
+                messages=history_json
+            )
+            db.add(session)
+        
+        db.commit()
+        db.refresh(session)
+
+        return {
+            "message": ai_response_text, 
+            "session_id": session.id,
+            "thread_title": session.thread_title
+        }
+
+    except Exception as e:
+        db.rollback()
+        # Log the specific error to Render console for debugging
+        print(f"CRITICAL ERROR in /ai/chat: {str(e)}")
+        raise HTTPException(status_code=500, detail="Neural link for conversation is unstable.")
+
+@app.get("/analysis/sessions", tags=["Analysis"])
+def get_chat_sessions(user_id: AuthUserID, db: DBSession):
+    # Returns all sessions, even those without a valid dashboard_id
+    sessions = db.query(ChatSession).filter(ChatSession.user_id == user_id).order_by(ChatSession.updated_at.desc()).all()
+    return sessions
