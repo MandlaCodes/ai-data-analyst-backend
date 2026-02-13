@@ -1,901 +1,513 @@
-import os
-import sys
-import json
-import httpx 
-import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Annotated, Optional, List, Union, Any
-from urllib.parse import urlencode 
+/**
+ * components/AIAnalysisPanel.js - EXECUTIVE INTELLIGENCE ENGINE
+ * Updated: 2026-01-20 - INTEGRATION: Polar Paywall & Trial Flow
+ */
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import axios from 'axios';
+import { motion, AnimatePresence } from 'framer-motion';
+import { 
+    FaRedo, FaSearch, FaRobot, FaVolumeUp, FaLayerGroup
+} from 'react-icons/fa';
+import { 
+    FiShield, FiZap, FiCpu, FiX, FiTarget, FiCheckCircle, FiFileText, FiTrendingUp, FiActivity, FiLock, FiArrowRight
+} from 'react-icons/fi';
 
-# FastAPI and dependencies
-from fastapi import FastAPI, Depends, HTTPException, Query, status, Request
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from fastapi.responses import RedirectResponse, JSONResponse
-from pydantic import BaseModel, EmailStr 
-from jose import jwt, JWTError
-from fastapi.security import OAuth2PasswordBearer
+const API_BASE_URL = "https://ai-data-analyst-backend-1nuw.onrender.com";
 
-# Official OpenAI SDK
-from openai import AsyncOpenAI
+const AudioWaveform = ({ color = "#bc13fe" }) => (
+    <div className="flex items-center gap-1 h-4">
+        {[...Array(4)].map((_, i) => (
+            <motion.div
+                key={i}
+                animate={{ height: [4, 16, 8, 14, 4] }}
+                transition={{ duration: 0.8, repeat: Infinity, delay: i * 0.1, ease: "easeInOut" }}
+                className="w-1 rounded-full"
+                style={{ backgroundColor: color }}
+            />
+        ))}
+    </div>
+);
 
-# Import all models, engine, and helper functions from db.py
-from db import (
-    User, AuditLog, Dashboard, Settings, Token, StateToken,
-    Base, deactivate_user_subscription_db, engine, SessionLocal,
-    get_user_by_email, create_user_db, create_audit_log,
-    get_user_profile_db, get_latest_dashboard_db, get_user_settings_db,
-    get_audit_logs_db, get_tokens_metadata_db, 
-    save_google_token, get_google_token, 
-    save_state_to_db, get_user_id_from_state_db, delete_state_from_db,
-    verify_password_helper , ChatSession
-)
+const InsightCard = ({ title, content, icon: Icon, isPurple, onClick }) => (
+    <div 
+        onClick={onClick}
+        className="relative group bg-[#111116] border border-white/5 rounded-[2rem] overflow-hidden flex flex-col transition-all duration-300 hover:border-white/20 hover:translate-y-[-4px] shadow-2xl cursor-pointer"
+    >
+        <div className="h-1.5 w-full opacity-80" style={{ backgroundColor: isPurple ? '#bc13fe' : '#a5b4fc' }} />
+        <div className="p-8 flex flex-col h-full">
+            <div className="flex justify-between items-start mb-6">
+                <div className={`p-3 rounded-xl bg-white/5 ${isPurple ? 'text-[#bc13fe]' : 'text-indigo-400'}`}>
+                    <Icon size={20} />
+                </div>
+                <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded-full border border-white/10">
+                    <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${isPurple ? 'bg-[#bc13fe]' : 'bg-indigo-400'}`} />
+                    <span className="text-[9px] font-bold text-white/60 uppercase tracking-widest">Live Analysis</span>
+                </div>
+            </div>
+            <h4 className="text-white font-bold text-lg mb-3 tracking-tight group-hover:text-indigo-300 transition-colors">{title}</h4>
+            <p className="text-white text-sm leading-relaxed mb-8 line-clamp-4 font-medium">{content || "Analyzing data vectors..."}</p>
+            <div className="space-y-3 mb-8 flex-1">
+                <div className="flex items-center gap-3 text-[10px] text-white uppercase tracking-[0.2em] font-bold">
+                    <FiCheckCircle className={isPurple ? 'text-[#bc13fe]' : 'text-indigo-400'} /> Verified Insight
+                </div>
+                <div className="flex items-center gap-3 text-[10px] text-white uppercase tracking-[0.2em] font-bold">
+                    <FiCheckCircle className={isPurple ? 'text-[#bc13fe]' : 'text-indigo-400'} /> ROI Aligned
+                </div>
+            </div>
+            <button className={`w-full py-4 rounded-xl text-[11px] font-black uppercase tracking-[0.2em] transition-all ${isPurple ? 'bg-[#bc13fe]/10 text-[#bc13fe] border border-[#bc13fe]/20' : 'bg-white/5 text-white/40 border border-white/10'}`}>
+                View Deep Intel
+            </button>
+        </div>
+    </div>
+);
 
+const TypewriterText = ({ text, delay = 5 }) => {
+    const [displayedText, setDisplayedText] = useState("");
+    useEffect(() => {
+        setDisplayedText(""); 
+        if (!text) return;
+        let currentIndex = 0;
+        const timer = setInterval(() => {
+            if (currentIndex < text.length) {
+                setDisplayedText(text.substring(0, currentIndex + 1));
+                currentIndex++;
+            } else { clearInterval(timer); }
+        }, delay);
+        return () => clearInterval(timer);
+    }, [text, delay]);
+    return <span>{displayedText}</span>;
+};
 
-# --- Environment and Configuration ---
-SECRET_KEY = os.environ.get("SECRET_KEY", "METRIA_SECURE_PHRASE_2025") 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
-API_TITLE = "Metria Neural Engine API" 
+const AIAnalysisPanel = ({ datasets = [], onUpdateAI }) => {
+    const [loading, setLoading] = useState(false);
+    const [analysisPhase, setAnalysisPhase] = useState(0);
+    const [expandedCard, setExpandedCard] = useState(null); 
+    const [isFullReportOpen, setIsFullReportOpen] = useState(false);
+    const [isSpeaking, setIsSpeaking] = useState(false);
+    const [intelligenceMode, setIntelligenceMode] = useState(null);
+    const [showModeSelector, setShowModeSelector] = useState(false);
+    const [showPaywall, setShowPaywall] = useState(false);
+    const [isRedirecting, setIsRedirecting] = useState(false);
+    
+    const panelRef = useRef(null);
+    const userToken = localStorage.getItem("adt_token");
+    const userProfile = useMemo(() => {
+        const stored = localStorage.getItem("adt_profile");
+        return stored ? JSON.parse(stored) : null;
+    }, []);
 
-GOOGLE_CLIENT_ID = os.environ.get("CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
-GOOGLE_REDIRECT_URI = os.environ.get("REDIRECT_URI")
-GOOGLE_SCOPES = "https://www.googleapis.com/auth/drive.file profile email"
-FRONTEND_URL = "https://metria.dev"
+    const aiInsights = datasets[0]?.aiStorage;
 
-# Initialize Async OpenAI Client
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    const phases = useMemo(() => [
+        "Initializing AI Analyst...",
+        `Aligning with ${userProfile?.organization || 'Corporate'} standards...`,
+        "Syncing Neural models...",
+        intelligenceMode === 'correlation' ? "Mapping cross-dataset dependencies..." : 
+        intelligenceMode === 'compare' ? "Calculating performance variance..." : "Auditing standalone silos...",
+        "Simulating ROI Impact...",
+        "Finalizing Strategic Report..."
+    ], [userProfile, intelligenceMode]);
 
-# --- Application Initialization ---
-app = FastAPI(title=API_TITLE)
-
-# -------------------- CORS Configuration --------------------
-origins = [
-    FRONTEND_URL, 
-    "http://localhost:3000",
-    "http://localhost:5173",
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins, 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# -------------------- DATABASE DEPENDENCY --------------------
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-DBSession = Annotated[Session, Depends(get_db)]
-
-
-@app.on_event("startup")
-def on_startup():
-    try:
-        Base.metadata.create_all(bind=engine) 
-        print("Database initialization successful. Neural Core Active.")
-    except Exception as e:
-        print(f"Database initialization FAILED: {e}")
-
-# -------------------- AI ANALYST SCHEMAS & UTILITIES --------------------
-
-class AIChatRequest(BaseModel):
-    message: str
-    context: dict
-
-class CompareTrendsRequest(BaseModel):
-    base_id: int
-    target_id: int
-
-async def call_openai_analyst(prompt: str, system_instruction: str, json_mode: bool = True):
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=500, detail="OpenAI API Key not configured")
-
-    try:
-        response_format = {"type": "json_object"} if json_mode else None
-        response = await client.chat.completions.create(
-            model="gpt-4o", 
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1, 
-            response_format=response_format
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"OpenAI API Call Failed: {e}")
-        if json_mode:
-            return json.dumps({
-                "summary": "Neural synthesis interrupted.",
-                "root_cause": "Core timeout. Connection to data stream lost.",
-                "risk": "Operational blindness. Verify data density.", 
-                "opportunity": "Synthesis interrupted. Retry execution.", 
-                "action": "Refresh data stream and re-initialize analysis.",
-                "roi_impact": "Unknown",
-                "confidence": 0.0
-            })
-        return "I encountered an error processing that request."
-
-# -------------------- AUTHENTICATION HELPERS --------------------
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
-credentials_exception = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED,
-    detail="Could not validate credentials",
-    headers={"WWW-Authenticate": "Bearer"},
-)
-
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def get_current_user_id(token: Annotated[str, Depends(oauth2_scheme)]):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id_str: str = payload.get("sub")
-        if user_id_str is None:
-            raise credentials_exception
-        return int(user_id_str)
-    except (JWTError, ValueError):
-        raise credentials_exception
-
-def get_user_from_query_token(token: str, db: Session):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id_str: str = payload.get("sub")
-        if user_id_str is None:
-            raise credentials_exception
-        user = get_user_profile_db(db, int(user_id_str))
-        if not user:
-            raise credentials_exception
-        return {"id": user.id, "email": user.email}
-    except (JWTError, ValueError):
-        raise credentials_exception
-
-def get_current_user(db: DBSession, user_id: Annotated[int, Depends(get_current_user_id)]):
-    user = get_user_profile_db(db, user_id)
-    if user is None:
-        raise credentials_exception
-    return user
-
-AuthUser = Annotated[Any, Depends(get_current_user)]
-AuthUserID = Annotated[int, Depends(get_current_user_id)]
-
-# -------------------- AUTH & PROFILE ROUTES --------------------
-
-class UserCreate(BaseModel):
-    email: EmailStr
-    password: str
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    organization: Optional[str] = None
-    industry: Optional[str] = None
-
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-class EmailCheckRequest(BaseModel):
-    email: EmailStr
-
-class ProfileUpdateRequest(BaseModel):
-    first_name: Optional[str]
-    last_name: Optional[str]
-    organization: Optional[str]
-    industry: Optional[str]
-@app.post("/auth/check-email", tags=["Auth"])
-def check_email_availability(payload: EmailCheckRequest, db: DBSession):
-    """
-    Pre-flight check to see if an email is already registered.
-    Used by the multi-step signup form to catch errors early.
-    """
-    user = get_user_by_email(db, payload.email)
-    if user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, 
-            detail="This email is already linked to an account."
-        )
-    return {"status": "available", "message": "Email is clear to use."}
-
-@app.post("/auth/signup", tags=["Auth"])
-def signup(payload: UserCreate, db: DBSession, request: Request):
-    if get_user_by_email(db, payload.email):
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    user = create_user_db(
-        db, 
-        email=payload.email, 
-        password=payload.password,
-        first_name=payload.first_name,
-        last_name=payload.last_name,
-        organization=payload.organization,
-        industry=payload.industry
-    )
-    db.commit() 
-
-    token = create_access_token({"sub": str(user.id)})
-    create_audit_log(db, user_id=user.id, event_type="SIGNUP_SUCCESS", ip_address=request.client.host if request.client else "unknown")
-    db.commit()
-
-    return { 
-        "user_id": user.id, 
-        "email": user.email, 
-        "token": token,
-        "user": {
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "organization": user.organization,
-            "industry": user.industry
+    // Reset redirecting state when paywall is closed
+    useEffect(() => {
+        if (!showPaywall) {
+            setIsRedirecting(false);
         }
-    }
+    }, [showPaywall]);
 
-@app.post("/auth/login", tags=["Auth"])
-def login(payload: UserLogin, db: DBSession, request: Request):
-    user = get_user_by_email(db, payload.email)
-    if not user or not verify_password_helper(payload.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
-    
-    token = create_access_token({"sub": str(user.id)})
-    create_audit_log(db, user_id=user.id, event_type="LOGIN_SUCCESS", ip_address=request.client.host if request.client else "unknown")
-    db.commit()
-    
-    return { 
-        "user_id": user.id, 
-        "email": user.email, 
-        "token": token,
-        "user": {
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "organization": user.organization,
-            "industry": user.industry
+    useEffect(() => {
+        if (datasets.length > 1 && !aiInsights && !loading) {
+            // Wait for user to click button instead of auto-opening
+        } else if (datasets.length === 1 && !intelligenceMode && !loading && !aiInsights) {
+            setIntelligenceMode('standalone');
         }
-    }
+    }, [datasets.length, loading, aiInsights]);
 
-@app.get("/auth/me", tags=["Auth"])
-def me(user: AuthUser):
-    return { 
-        "user_id": user.id, 
-        "email": user.email,
-        "is_trial_active": user.is_trial_active, # This tells the frontend to hide the paywall
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "organization": user.organization,
-        "industry": user.industry
-    }
+    useEffect(() => {
+        window.speechSynthesis.getVoices();
+    }, []);
 
-@app.put("/auth/profile/update", tags=["Auth"])
-def update_profile(payload: ProfileUpdateRequest, user_id: AuthUserID, db: DBSession):
-    user = get_user_profile_db(db, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    user.first_name = payload.first_name
-    user.last_name = payload.last_name
-    user.organization = payload.organization
-    user.industry = payload.industry
-    
-    db.commit()
-    db.refresh(user)
-    return user
+    useEffect(() => {
+        let interval;
+        if (loading) {
+            interval = setInterval(() => {
+                setAnalysisPhase((prev) => (prev < phases.length - 1 ? prev + 1 : prev));
+            }, 2000);
+        } else { setAnalysisPhase(0); }
+        return () => clearInterval(interval);
+    }, [loading, phases.length]);
 
-class AIAnalysisRequest(BaseModel):
-    context: Union[dict, List[dict]]
-    # Add an alias so it works whether frontend sends 'strategy' or 'mode'
-    strategy: Optional[str] = "standalone" 
-    mode: Optional[str] = None
-# -------------------- RE-ENGINEERED ANALYZE ROUTE --------------------
-
-@app.post("/ai/analyze", tags=["AI Analyst"])
-async def analyze_data(payload: AIAnalysisRequest, user: AuthUser, db: DBSession):
-    org = user.organization if user.organization else "the organization"
-    ind = user.industry if user.industry else "the current sector"
-    exec_name = user.first_name if user.first_name else "Executive"
-
-    # --- STRATEGIC LOGIC: PIVOTED FROM OBSERVATION TO COMMAND ---
-    if payload.strategy == "correlation":
-        strategy_prompt = (
-            "MISSION: SYSTEM SYNERGY COMMAND. Identify which markets are cannibalizing resources from others. "
-            "Expose hidden friction where high HHP markets are being starved of sub-area nodes. "
-            "Direct the shift of capital from low-velocity silos to high-growth clusters."
-        )
-        trigger = "Execute synergy audit and command resource reallocation."
-    elif payload.strategy == "compare":
-        strategy_prompt = (
-            "MISSION: CAPITAL EFFICIENCY ENFORCEMENT. Rank locations by Execution Velocity. "
-            "Identify 'Zombie Markets' with high HHP but zero actual output. "
-            "Command the immediate termination of underperforming expansion plans."
-        )
-        trigger = "Enforce capital efficiency and terminate zero-velocity projects."
-    else:  # Standalone
-        strategy_prompt = (
-            "MISSION: OPERATIONAL STRIKE. Detect the precise point of failure in the execution chain. "
-            "Diagnose why markets with massive potential show zero sub-area activity. "
-            "Generate high-impact tactical pivots to recover lost revenue leaks."
-        )
-        trigger = "Execute operational strike and identify recovery pivots."
-
-        system_prompt = f"""
-        You are the world's most elite Chief Data & Strategy Officer embedded inside {org}, operating within the {ind} sector.
-
-        You are reporting directly to {exec_name}.
-
-        MISSION:
-        Transform raw business data into executive-level intelligence.
-
-        RULES:
-        - Respond ONLY in valid JSON.
-        - Every key must contain exactly 3 sentences.
-        - No passive language.
-        - No filler.
-        - Diagnose performance using financial, operational, and capital efficiency lenses.
-        - If revenue is volatile, classify as 'Cashflow Instability'.
-        - If revenue is concentrated in one client or segment, classify as 'Customer Concentration Risk'.
-        - If margins are high but growth is slow, classify as 'Underleveraged Profit Engine'.
-        - If growth is high but profit is low, classify as 'Capital Inefficiency'.
-
-        LANGUAGE:
-        Use executive terminology such as:
-        - Revenue Velocity
-        - Margin Compression
-        - Capital Allocation
-        - Execution Friction
-        - Cashflow Volatility
-        - Pricing Power
-        - Operational Leverage
-        - Strategic Moat
-        - Revenue Concentration
-        - Scale Potential
-
-        REQUIRED_KEYS:
-        'summary',
-        'performance_diagnosis',
-        'financial_health',
-        'growth_vector',
-        'capital_efficiency',
-        'risk_exposure',
-        'cashflow_stability',
-        'customer_concentration',
-        'operational_leverage',
-        'pricing_power',
-        'action_plan',
-        'strategic_priority',
-        'roi_projection',
-        'confidence_score'
-        """
-
-    user_prompt = (
-        f"INPUT DATA: {json.dumps(payload.context)}. "
-        f"TASK: {trigger} Compare the HHP density to Sub-Area execution. "
-        "Identify exactly which area to pull resources from and which area to flood with capital."
-    )
-
-    try:
-        raw_ai_response = await call_openai_analyst(user_prompt, system_prompt, json_mode=True)
-        parsed_response = json.loads(raw_ai_response)
-        
-        # Self-Correction to ensure the UI doesn't break
-        if "executive_summary" in parsed_response and "summary" not in parsed_response:
-            parsed_response["summary"] = parsed_response.pop("executive_summary")
-        
-        # Ensure the new 'directive' key exists for the frontend "Top Priority" card
-        if "directive" not in parsed_response:
-            parsed_response["directive"] = "Accelerate core market node expansion immediately to capture unoptimized HHP density."
-            
-        return parsed_response
-    except Exception as e:
-        print(f"Neural Engine Error: {e}")
-        raise HTTPException(status_code=500, detail="The Strategic Engine is currently recalibrating for complex data structures.")
-@app.post("/ai/compare-trends", tags=["AI Analyst"])
-async def compare_historical_trends(payload: CompareTrendsRequest, user_id: AuthUserID, db: DBSession):
-    # Using your Dashboard model from db.py
-    base_session = db.query(Dashboard).filter(Dashboard.id == payload.base_id, Dashboard.user_id == user_id).first()
-    target_session = db.query(Dashboard).filter(Dashboard.id == payload.target_id, Dashboard.user_id == user_id).first()
-
-    if not base_session or not target_session:
-        raise HTTPException(status_code=404, detail="One or both sessions not found")
-
-    # Extracting the AI storage from your layout_data Text column
-    base_data = json.loads(base_session.layout_data).get("ai_insight", {})
-    target_data = json.loads(target_session.layout_data).get("ai_insight", {})
-
-   # Update your system_prompt CONSTRAINTS section:
-    system_prompt = (
-    f"You are the world's best Lead Strategic Data Analyst at {org}... {strategy_prompt} "
-    "Respond ONLY in valid JSON.\n\n"
-    "CONSTRAINTS:\n"
-    "1. ... (your existing constraints)\n"
-    "4. TRUTH OFFSET: If the datasets show NO logical or statistical correlation, "
-    "do not invent one. Instead, define the 'Silo Friction'—explain why these "
-    "metrics are decoupled and why that decoupling is a risk or an inefficiency."
-)
-    
-    user_prompt = f"Previous Analysis: {json.dumps(base_data)}\nCurrent Analysis: {json.dumps(target_data)}"
-    comparison = await call_openai_analyst(user_prompt, system_prompt, json_mode=False)
-    return {"comparison": comparison}
-
-# -------------------- GOOGLE OAUTH FLOW --------------------
-
-def get_google_auth_url(state: str):
-    params = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": GOOGLE_REDIRECT_URI,
-        "response_type": "code",
-        "scope": GOOGLE_SCOPES,
-        "access_type": "offline", 
-        "prompt": "consent",       
-        "state": state 
-    }
-    return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
-
-@app.get("/auth/google_sheets", tags=["Integrations"])
-def google_oauth_start(token: str, db: Session = Depends(get_db), return_path: str = "/dashboard/integrations"):
-    user = get_user_from_query_token(token, db)
-    state_uuid = str(uuid.uuid4())
-    save_state_to_db(db, user_id=user["id"], state_uuid=state_uuid, return_path=return_path)
-    db.commit()
-    return RedirectResponse(url=get_google_auth_url(state=state_uuid))
-
-@app.get("/auth/callback", tags=["Integrations"], include_in_schema=False)
-async def google_oauth_callback(code: str, state: str, db: DBSession, request: Request):
-    state_data = get_user_id_from_state_db(db, state_uuid=state)
-    if not state_data:
-        # If state missing, redirect to frontend integrations with error param
-        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard/integrations?connected=false&error=session_expired")
-        
-    user_id = state_data["user_id"]
-    final_return_path = state_data.get("return_path", "/dashboard/integrations")
-
-    async with httpx.AsyncClient() as client_http:
-        resp = await client_http.post("https://oauth2.googleapis.com/token", data={
-            "code": code,
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uri": GOOGLE_REDIRECT_URI,
-            "grant_type": "authorization_code",
-        })
-        token_data = resp.json()
-
-    if "access_token" in token_data:
-        save_google_token(db, user_id, token_data)
-        delete_state_from_db(db, state_uuid=state)
-        create_audit_log(db, user_id=user_id, event_type="GOOGLE_CONNECTED", ip_address=request.client.host if request.client else None)
-        db.commit()
-        return RedirectResponse(url=f"{FRONTEND_URL}{final_return_path}?connected=true")
-
-    return RedirectResponse(url=f"{FRONTEND_URL}{final_return_path}?connected=false&error=token_exchange_failed")
-
-# -------------------- GOOGLE API DATA FETCHING --------------------
-
-@app.get("/connected-apps", tags=["Integrations"])
-def get_connected_apps(user_id: AuthUserID, db: DBSession):
-    token = get_google_token(db, user_id)
-    if token:
-        return {
-            "google_sheets": True,
-            "google_sheets_last_sync": token.created_at
+    const handleStartTrial = async () => {
+        setIsRedirecting(true);
+        try {
+            const res = await axios.post(`${API_BASE_URL}/billing/start-trial`, {}, {
+                headers: { Authorization: `Bearer ${userToken}` }
+            });
+            if (res.data.checkout_url) {
+                window.location.href = res.data.checkout_url;
+            }
+        } catch (err) {
+            console.error("Billing redirect failed", err);
+            setIsRedirecting(false);
         }
-    return {"google_sheets": False}
+    };
 
-@app.post("/disconnect/google_sheets", tags=["Integrations"])
-def disconnect_google(user_id: AuthUserID, db: DBSession):
-    db.query(Token).filter(Token.user_id == user_id, Token.service == 'google_sheets').delete()
-    db.commit()
-    return {"status": "disconnected"}
-
-@app.get("/google/sheets", tags=["Integrations"])
-async def list_google_sheets(user_id: AuthUserID, db: DBSession):
-    token_obj = get_google_token(db, user_id)
-    if not token_obj:
-        raise HTTPException(status_code=401, detail="Not connected")
-
-    async with httpx.AsyncClient() as client_http:
-        headers = {"Authorization": f"Bearer {token_obj.access_token}"}
-        params = {"q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false", "fields": "files(id, name)"}
-        resp = await client_http.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
-
-        if resp.status_code == 401 and token_obj.refresh_token:
-            r = await client_http.post("https://oauth2.googleapis.com/token", data={
-                "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
-                "refresh_token": token_obj.refresh_token, "grant_type": "refresh_token",
-            })
-            if r.status_code == 200:
-                token_obj.access_token = r.json()["access_token"]
-                db.commit()
-                headers["Authorization"] = f"Bearer {token_obj.access_token}"
-                resp = await client_http.get("https://www.googleapis.com/drive/v3/files", headers=headers, params=params)
-
-        return resp.json() if resp.status_code == 200 else {"files": []}
-
-@app.get("/google/sheets/{spreadsheet_id}", tags=["Integrations"])
-async def get_google_sheet_data(spreadsheet_id: str, user_id: AuthUserID, db: DBSession):
-    token_obj = get_google_token(db, user_id)
-    if not token_obj: raise HTTPException(status_code=401)
-    async with httpx.AsyncClient() as client_http:
-        headers = {"Authorization": f"Bearer {token_obj.access_token}"}
-        url = f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/A1:Z1000"
-        resp = await client_http.get(url, headers=headers)
-        return resp.json()
-
-# -------------------- ANALYSIS SESSIONS & TRENDS --------------------
-
-class PageStateSaveRequest(BaseModel):
-    name: str = "Latest Dashboard"
-    page_state: dict 
-
-@app.post("/analysis/save", tags=["Analysis"])
-def save_analysis(payload: PageStateSaveRequest, user_id: AuthUserID, db: DBSession):
-    snapshot_json = json.dumps(payload.page_state)
-    dashboard = Dashboard(user_id=user_id, name=payload.name, layout_data=snapshot_json)
-    db.add(dashboard)
-    db.commit()
-    return {"message": "Session Saved"}
-
-@app.get("/analysis/current", tags=["Analysis"])
-def get_current_analysis(user_id: AuthUserID, db: DBSession):
-    dashboard = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).first()
-    if not dashboard: return {"page_state": None}
-    return {
-        "id": dashboard.id,
-        "updated_at": dashboard.last_accessed,
-        "page_state": json.loads(dashboard.layout_data)
-    }
-
-@app.get("/analysis/trends", tags=["Analysis"])
-def get_analysis_trends(user_id: AuthUserID, db: DBSession):
-    sessions = db.query(Dashboard).filter(Dashboard.user_id == user_id).order_by(Dashboard.last_accessed.desc()).all()
-    trends = []
-    for s in sessions:
-        try:
-            data = json.loads(s.layout_data)
-            insight = data.get("ai_insight")
-            if not insight and data.get("allDatasets"):
-                insight = data["allDatasets"][0].get("aiStorage")
-
-            if insight:
-                trends.append({
-                    "id": s.id,
-                    "date": s.last_accessed,
-                    "session_name": s.name,
-                    "summary": insight.get("summary", "No summary available."),
-                    "risk": insight.get("risk"),
-                    "opportunity": insight.get("opportunity"),
-                    "action": insight.get("action"),
-                    "root_cause": insight.get("root_cause"),
-                    "roi": insight.get("roi_impact"),
-                    "confidence": insight.get("confidence")
-                })
-        except Exception as e:
-            print(f"Trend parsing error for ID {s.id}: {e}")
-            continue
-    return trends
-
-# -------------------- SYSTEM --------------------
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "engine": "Metria Neural Core 5.0 - High Velocity Tier"}
-
-@app.get("/")
-def root():
-    return {"message": "MetriaAI API Online - Mission Ready"}
-# Add this inside main.py, preferably near the other Google routes
-
-@app.get("/google-token", tags=["Integrations"])
-async def get_active_google_token(user_id: AuthUserID, db: DBSession):
-    """
-    Retrieves the raw Google Access Token for the Picker API.
-    Handles automatic refreshing if the token is expired.
-    """
-    token_obj = get_google_token(db, user_id)
-    if not token_obj:
-        raise HTTPException(status_code=404, detail="Google account not connected")
-
-    # Check if token is expired or about to expire (within 1 minute)
-    now = datetime.now(timezone.utc)
-    if token_obj.expires_at and token_obj.expires_at <= (now + timedelta(minutes=1)):
-        if token_obj.refresh_token:
-            async with httpx.AsyncClient() as client_http:
-                r = await client_http.post("https://oauth2.googleapis.com/token", data={
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "refresh_token": token_obj.refresh_token,
-                    "grant_type": "refresh_token",
-                })
-                if r.status_code == 200:
-                    new_data = r.json()
-                    token_obj.access_token = new_data["access_token"]
-                    if "expires_in" in new_data:
-                        token_obj.expires_at = now + timedelta(seconds=new_data["expires_in"])
-                    db.commit()
-                else:
-                    raise HTTPException(status_code=401, detail="Session expired. Please reconnect Google.")
-        else:
-            raise HTTPException(status_code=401, detail="Token expired and no refresh token available.")
-
-    return {"access_token": token_obj.access_token}
-
-## --- BILLING & POLAR INTEGRATION ---
-
-from db import activate_user_trial_db
-
-@app.post("/billing/start-trial", tags=["Billing"])
-async def start_trial(user: AuthUser, db: DBSession):
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://api.polar.sh/v1/checkouts/", 
-                headers={
-                    "Authorization": f"Bearer {os.environ.get('POLAR_ACCESS_TOKEN')}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json"
-                },
-                json={
-                    "product_id": "8cda6e5c-1c89-43ce-91e3-32ad1d18cfce",
-                    "success_url": f"{FRONTEND_URL}/dashboard/analytics?session=success",
-                    "customer_email": user.email,
-                    "metadata": {"user_id": str(user.id)} 
-                }
-            )
-
-            if response.status_code not in [200, 201]:
-                print(f"Polar API Error ({response.status_code}): {response.text}")
-                raise HTTPException(status_code=response.status_code, detail=f"Polar Error: {response.text}")
-
-            res_data = response.json()
-            create_audit_log(db, user_id=user.id, event_type="CHECKOUT_INITIATED")
-            db.commit()
-
-            return {"checkout_url": res_data.get("url")}
-
-    except Exception as e:
-        print(f"System Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# --- WEBHOOK VERIFICATION BLOCK ---
-
-import hmac
-import hashlib
-import json
-import os
-from fastapi import Request, HTTPException, Depends
-from sqlalchemy.orm import Session
-
-import hmac
-import hashlib
-import base64
-import json
-import os
-from fastapi import Request, HTTPException, Depends
-from sqlalchemy.orm import Session
-
-@app.post("/webhooks/polar", tags=["Billing"])
-async def polar_webhook(request: Request, db: Session = Depends(get_db)):
-    # 1. Get raw bytes and the specific Standard Webhook headers
-    payload = await request.body()
-    msg_id = request.headers.get("webhook-id")
-    msg_timestamp = request.headers.get("webhook-timestamp")
-    signature_header = request.headers.get("webhook-signature")
-
-    webhook_secret = os.getenv("POLAR_WEBHOOK_SECRET", "").strip()
-
-    if not all([msg_id, msg_timestamp, signature_header, webhook_secret]):
-        print("❌ Missing headers or Secret")
-        raise HTTPException(status_code=401, detail="Missing required headers")
-
-    # 2. Extract the actual Base64 hash from the header
-    try:
-        # Polar format: 'v1,base64_hash'
-        received_sig = signature_header.split(",")[1] if "," in signature_header else signature_header
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid signature header format")
-
-    # 3. Construct the signed message exactly as Polar expects
-    # Format: <msg_id>.<msg_timestamp>.<payload_bytes>
-    to_sign = f"{msg_id}.{msg_timestamp}.".encode("utf-8") + payload
-
-    # 4. Compute HMAC SHA256 (BINARY) and convert to BASE64
-    computed_hmac = hmac.new(
-        webhook_secret.encode('utf-8'),
-        to_sign,
-        hashlib.sha256
-    ).digest() # Binary digest
-
-    computed_sig = base64.b64encode(computed_hmac).decode('utf-8')
-
-    # 5. Security Compare
-    if not hmac.compare_digest(computed_sig, received_sig):
-        print(f"❌ Signature Mismatch.")
-        print(f"Computed (Base64): {computed_sig[:10]}...")
-        print(f"Received (Base64): {received_sig[:10]}...")
-        raise HTTPException(status_code=401, detail="Invalid signature")
-
-    print("✅ Webhook Signature Verified!")
-
-    # 6. Process the Event
-    try:
-        event = json.loads(payload)
-        data = event.get("data", {})
-
-        # Check order or subscription events
-        if event.get("type") in ["order.created", "subscription.created", "subscription.updated"]:
-            # Pull user_id from metadata we set during checkout
-            user_id = data.get("metadata", {}).get("user_id")
-            if user_id:
-                activate_user_trial_db(db, int(user_id), data.get("customer_id"))
-                print(f"🚀 Neural Core activated for User {user_id}")
-            else:
-                print("⚠️ Webhook received but no user_id found in metadata")
-
-        return {"status": "success"}
-
-    except Exception as e:
-        print(f"Error processing webhook data: {e}")
-        raise HTTPException(status_code=400, detail="Data processing failed")
-    # --- CANCELLATION ENDPOINT ---
-
-@app.post("/payments/cancel", tags=["Billing"])
-async def cancel_subscription(user: AuthUser, db: DBSession):
-    """
-    Retrieves the user's active subscription from Polar and revokes it.
-    """
-    if not user.polar_customer_id:
-        raise HTTPException(
-            status_code=400, 
-            detail="No active subscription record found for this account."
-        )
-
-    polar_key = os.environ.get('POLAR_ACCESS_TOKEN')
-    
-    async with httpx.AsyncClient() as client:
-        # 1. Fetch active subscriptions for this customer from Polar
-        # Polar allows multiple, but we fetch the most recent active one
-        sub_resp = await client.get(
-            f"https://api.polar.sh/v1/subscriptions/?customer_id={user.polar_customer_id}&active=true",
-            headers={"Authorization": f"Bearer {polar_key}"}
-        )
-
-        if sub_resp.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to reach billing server.")
-
-        subscriptions = sub_resp.json().get("items", [])
-        
-        if not subscriptions:
-            # If no active sub found on Polar, sync our DB to reflect that
-            deactivate_user_subscription_db(db, user.id)
-            return {"message": "No active subscription found on provider. Local status updated."}
-
-        # 2. Revoke the specific subscription
-        # We take the first active one found
-        subscription_id = subscriptions[0]["id"]
-        
-        revoke_resp = await client.post(
-            f"https://api.polar.sh/v1/subscriptions/{subscription_id}/revoke",
-            headers={"Authorization": f"Bearer {polar_key}"}
-        )
-
-        if revoke_resp.status_code in [200, 204, 201]:
-            # 3. Update local database
-            deactivate_user_subscription_db(db, user.id)
-            create_audit_log(db, user_id=user.id, event_type="SUBSCRIPTION_CANCELLED")
-            db.commit()
-            return {"status": "success", "message": "Subscription revoked successfully."}
-        else:
-            print(f"Polar Revoke Error: {revoke_resp.text}")
-            raise HTTPException(status_code=revoke_resp.status_code, detail="Provider failed to revoke subscription.")
-
-from typing import List, Optional
-import json
-from fastapi import HTTPException
-# Ensure Dashboard is imported from your db module
-# from db import Dashboard, ChatSession 
-
-class ChatMessage(BaseModel):
-    role: str # 'user' or 'assistant'
-    content: str
-
-class AIChatHistoryRequest(BaseModel):
-    messages: List[ChatMessage]
-    context: Optional[dict] = None
-    dashboard_id: Optional[int] = None # Will accept BigInt from frontend
-    session_id: Optional[int] = None 
-
-@app.post("/ai/chat", tags=["AI Analyst"])
-async def chat_with_analyst(payload: AIChatHistoryRequest, user: AuthUser, db: DBSession):
-    """
-    Conversational endpoint with 'Referential Integrity Guard'.
-    Ensures chats save even if the dashboard_id is missing from the DB.
-    """
-    org = user.organization or "the organization"
-    exec_name = user.first_name or "Executive"
-
-    system_instruction = (
-        f"You are the Lead Strategic Data Analyst at {org} reporting to {exec_name}. "
-        "Your tone is decisive, high-velocity, and command-oriented. "
-        "Avoid passive language. Use terms like 'Execution Velocity' and 'Revenue Leak'. "
-        "If context data is provided, use it to justify tactical pivots."
-    )
-
-    # 1. Prepare messages for OpenAI
-    api_messages = [{"role": "system", "content": system_instruction}]
-    
-    current_messages = [msg.model_dump() for msg in payload.messages]
-    if payload.context and len(current_messages) > 0:
-        current_messages[-1]["content"] += f"\n[DATA CONTEXT: {json.dumps(payload.context)}]"
-
-    for msg in current_messages:
-        api_messages.append(msg)
-
-    try:
-        # 2. Call OpenAI
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=api_messages,
-            temperature=0.3
-        )
-        ai_response_text = response.choices[0].message.content
-
-        # 3. Persistence Logic: The Resilience Guard
-        full_history = payload.messages + [ChatMessage(role="assistant", content=ai_response_text)]
-        history_json = json.dumps([m.model_dump() for m in full_history])
-
-        # VALIDATION GATE: Check if dashboard exists before linking
-        valid_dashboard_id = None
-        if payload.dashboard_id:
-            db_dash = db.query(Dashboard).filter(Dashboard.id == payload.dashboard_id).first()
-            if db_dash:
-                valid_dashboard_id = payload.dashboard_id
-            else:
-                print(f"Warning: Dashboard {payload.dashboard_id} not found. Saving chat as orphaned.")
-
-        if payload.session_id:
-            # Update existing thread
-            session = db.query(ChatSession).filter(
-                ChatSession.id == payload.session_id, 
-                ChatSession.user_id == user.id
-            ).first()
-            if session:
-                session.messages = history_json
-                # Update dashboard link if it was missing
-                if valid_dashboard_id:
-                    session.dashboard_id = valid_dashboard_id
-        else:
-            # Create a brand new session with validated dashboard_id
-            session = ChatSession(
-                user_id=user.id,
-                dashboard_id=valid_dashboard_id, 
-                thread_title=f"Strategy: {payload.messages[0].content[:30]}...",
-                messages=history_json
-            )
-            db.add(session)
-        
-        db.commit()
-        db.refresh(session)
-
-        return {
-            "message": ai_response_text, 
-            "session_id": session.id,
-            "thread_title": session.thread_title
+    const toggleSpeech = (textOverride) => {
+        if (isSpeaking) {
+            window.speechSynthesis.cancel();
+            setIsSpeaking(false);
+            return;
         }
 
-    except Exception as e:
-        db.rollback()
-        # Log the specific error to Render console for debugging
-        print(f"CRITICAL ERROR in /ai/chat: {str(e)}")
-        raise HTTPException(status_code=500, detail="Neural link for conversation is unstable.")
+        let contentToRead = textOverride;
+        if (isFullReportOpen) {
+            contentToRead = `Right... Let's take a look at the strategic REPORT. First, the Executive Summary: ${aiInsights.summary}. Moving on... our primary discovery found that ${aiInsights.root_cause}. Regarding the potential risks, we've identified the following: ${aiInsights.risk}. On a more positive note; the growth opportunity is significant: ${aiInsights.opportunity}. Finally, our tactical priority will be: ${aiInsights.action}. That concludes the board briefing.`;
+        }
 
-@app.get("/analysis/sessions", tags=["Analysis"])
-def get_chat_sessions(user_id: AuthUserID, db: DBSession):
-    # Returns all sessions, even those without a valid dashboard_id
-    sessions = db.query(ChatSession).filter(ChatSession.user_id == user_id).order_by(ChatSession.updated_at.desc()).all()
-    return sessions
+        const utterance = new SpeechSynthesisUtterance(contentToRead);
+        const voices = window.speechSynthesis.getVoices();
+        const britishVoice = voices.find(v => 
+            (v.lang === 'en-GB' || v.lang.startsWith('en-GB')) && 
+            (v.name.includes('Female') || v.name.includes('UK') || v.name.includes('Hazel') || v.name.includes('Serena'))
+        );
+
+        utterance.voice = britishVoice || voices[0];
+        utterance.rate = 0.85; 
+        utterance.pitch = 1.1;
+        
+        utterance.onstart = () => setIsSpeaking(true);
+        utterance.onend = () => setIsSpeaking(false);
+        utterance.onerror = () => setIsSpeaking(false);
+
+        window.speechSynthesis.speak(utterance);
+    };
+
+    const runAnalysis = async (selectedMode) => {
+        if (datasets.length === 0 || !userToken) return;
+        setLoading(true);
+        try {
+            const contextBundle = datasets.map(ds => ({ 
+                id: ds.id, 
+                name: ds.name, 
+                metrics: ds.metrics 
+            }));
+
+            const response = await axios.post(`${API_BASE_URL}/ai/analyze`, { 
+                context: contextBundle,
+                strategy: selectedMode || 'standalone' 
+            }, { 
+                headers: { Authorization: `Bearer ${userToken}` } 
+            });
+
+            onUpdateAI(datasets[0].id, response.data);
+        } catch (error) { 
+            console.error("AI Analysis failed:", error); 
+        } finally { 
+            setLoading(false); 
+        }
+    };
+
+    const handleSelectMode = (mode) => {
+        setIntelligenceMode(mode);
+        setShowModeSelector(false);
+        runAnalysis(mode);
+    };
+
+    const handleInitialClick = () => {
+        // MONETIZATION CHECK
+        if (!userProfile?.is_trial_active) {
+            setShowPaywall(true);
+            return;
+        }
+
+        if (datasets.length > 1) {
+            setShowModeSelector(true);
+        } else {
+            handleSelectMode('standalone');
+        }
+    };
+
+    return (
+        <div ref={panelRef} className="relative overflow-hidden px-0 py-8 md:py-16 transition-all duration-700 min-h-[600px]">
+            <div className="absolute top-0 right-0 w-[600px] h-[600px] bg-indigo-600/5 blur-[140px] rounded-full pointer-events-none" />
+
+            {/* PAYWALL MODAL */}
+            <AnimatePresence>
+                {showPaywall && (
+                    <motion.div 
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[10005] bg-black/80 backdrop-blur-2xl flex items-center justify-center p-4"
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }}
+                            className="w-full max-w-lg bg-[#0f0f13] border border-white/10 rounded-[3rem] p-10 text-center shadow-3xl overflow-hidden relative"
+                        >
+                            {/* Close Button */}
+                            <button 
+                                onClick={() => setShowPaywall(false)}
+                                className="absolute top-8 right-8 text-white/40 hover:text-white transition-colors p-2 rounded-full hover:bg-white/5"
+                            >
+                                <FiX size={24} />
+                            </button>
+
+                            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-indigo-500" />
+                            <div className="mb-8 flex justify-center">
+                                <div className="w-20 h-20 bg-indigo-500/10 rounded-3xl flex items-center justify-center border border-indigo-500/20">
+                                    <FiLock className="text-indigo-400 text-3xl" />
+                                </div>
+                            </div>
+                            <h2 className="text-white text-3xl font-black mb-4 tracking-tight uppercase">Neural Core Locked</h2>
+                            <p className="text-white/60 mb-10 leading-relaxed">Advanced synergy audits and correlation mapping require an active Pro license. Start your 7-day trial to unlock full strategic intelligence.</p>
+                            
+                            <div className="space-y-4">
+                                <button 
+                                    onClick={handleStartTrial}
+                                    className="w-full py-6 bg-indigo-500 hover:bg-indigo-400 text-white rounded-2xl font-black uppercase tracking-widest transition-all flex items-center justify-center gap-3 group shadow-xl shadow-indigo-500/20"
+                                >
+                                    {isRedirecting ? "Connecting to Polar..." : (
+                                        <>Start 7 Days Free <FiArrowRight className="group-hover:translate-x-1 transition-transform" /></>
+                                    )}
+                                </button>
+                                <button 
+                                    onClick={() => setShowPaywall(false)}
+                                    className="w-full py-4 text-white/30 hover:text-white/60 text-[11px] font-bold uppercase tracking-[0.2em] transition-all"
+                                >
+                                    Review data first
+                                </button>
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {showModeSelector && datasets.length > 1 && (
+                    <motion.div 
+                        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-[9999] bg-black/70 backdrop-blur-xl flex items-center justify-center p-4"
+                    >
+                        <motion.div
+                            initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
+                            className="w-full max-w-xl bg-[#111116] border border-white/10 rounded-3xl p-6 md:p-10 shadow-2xl mx-auto"
+                        >
+                            <div className="flex justify-between items-center mb-8">
+                                <div className="flex items-center gap-3">
+                                    <div className="p-3 rounded-2xl bg-white/5 border border-white/10">
+                                        <FaLayerGroup className="text-indigo-400" size={26} />
+                                    </div>
+                                    <h2 className="text-white font-black text-lg md:text-2xl tracking-tight">Intelligence Strategy</h2>
+                                </div>
+                                <button onClick={() => setShowModeSelector(false)} className="p-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white">
+                                    <FiX size={18} />
+                                </button>
+                            </div>
+                            <p className="text-white/50 text-sm md:text-base mb-8">System detected {datasets.length} data streams. Configure neural synthesis mode.</p>
+                            <div className="grid grid-cols-1 gap-4">
+                                <button onClick={() => handleSelectMode('correlation')} className="p-5 rounded-2xl bg-white/5 border border-white/10 hover:border-indigo-400 hover:bg-indigo-500/5 transition-all text-left group">
+                                    <FiZap className="text-indigo-400 mb-3 group-hover:scale-110 transition-transform" size={22} />
+                                    <h4 className="text-white font-bold mb-1 text-sm md:text-base">Cross-Correlation</h4>
+                                    <p className="text-white/40 text-[10px] uppercase tracking-[0.2em]">Map cross-stream dependencies</p>
+                                </button>
+                                <button onClick={() => handleSelectMode('compare')} className="p-5 rounded-2xl bg-white/5 border border-white/10 hover:border-emerald-400 hover:bg-emerald-500/5 transition-all text-left group">
+                                    <FiTarget className="text-emerald-400 mb-3 group-hover:scale-110 transition-transform" size={22} />
+                                    <h4 className="text-white font-bold mb-1 text-sm md:text-base">Comparative Benchmark</h4>
+                                    <p className="text-white/40 text-[10px] uppercase tracking-[0.2em]">Analyze performance deltas</p>
+                                </button>
+                                <button onClick={() => handleSelectMode('standalone')} className="p-5 rounded-2xl bg-white/5 border border-white/10 hover:border-white/40 hover:bg-white/5 transition-all text-left group">
+                                    <FiCpu className="text-white/50 mb-3 group-hover:scale-110 transition-transform" size={22} />
+                                    <h4 className="text-white font-bold mb-1 text-sm md:text-base">Independent Streams</h4>
+                                    <p className="text-white/40 text-[10px] uppercase tracking-[0.2em]">Autonomous silo deep-dive</p>
+                                </button>
+                            </div>
+                            <button onClick={() => setShowModeSelector(false)} className="mt-6 w-full text-center text-white/30 hover:text-white/60 text-[10px] uppercase tracking-widest transition-colors">Continue without choosing</button>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-8 mb-16 relative z-10">
+                <div className="flex items-center gap-6">
+                    <div className="h-16 w-16 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-center shadow-inner">
+                        <FiCpu className="text-indigo-400 w-8 h-8" />
+                    </div>
+                    <div>
+                        <h2 className="text-[13px] font-black uppercase tracking-[0.6em] text-white">
+                            {userProfile?.organization || "STRATEGIC"} <span className="text-indigo-400">INTELLIGENCE</span>
+                        </h2>
+                        <div className="flex items-center gap-3 mt-2">
+                            <div className={`w-2 h-2 rounded-full ${loading ? 'bg-indigo-400 animate-pulse' : 'bg-emerald-500'}`} />
+                            <span className="text-[10px] text-white/70 font-bold uppercase tracking-widest">
+                                {loading ? "Computing Logic" : intelligenceMode ? `${intelligenceMode.toUpperCase()} MODE ACTIVE` : "Decision Support Active"}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                {aiInsights && !loading && (
+                    <div className="flex items-center gap-4">
+                        <button onClick={() => setIsFullReportOpen(true)} className="flex items-center gap-3 px-10 py-4 bg-indigo-500 text-white rounded-xl text-[15px] font-black uppercase tracking-widest hover:bg-white hover:text-black transition-all shadow-lg shadow-indigo-500/20">
+                           <FiFileText /> View full report
+                        </button>
+                        {datasets.length > 1 && (
+                            <button onClick={() => setShowModeSelector(true)} className="flex items-center gap-3 px-8 py-4 bg-white/5 border border-white/10 text-white rounded-xl text-[11px] font-black uppercase tracking-widest hover:bg-white hover:text-black transition-all">
+                                <FaRedo className="text-[9px]" /> Strategic Switch
+                            </button>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            <AnimatePresence mode="wait">
+                {loading ? (
+                    <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="py-48 flex flex-col items-center justify-center relative z-10"> 
+                        <motion.div animate={{ rotate: 360 }} transition={{ duration: 4, repeat: Infinity, ease: "linear" }}>
+                            <FiCpu className="text-indigo-400 mb-10 w-20 h-20 opacity-40" />
+                        </motion.div>
+                        <h3 className="text-white/80 text-[12px] font-bold uppercase tracking-[0.8em] text-center">{phases[analysisPhase]}</h3>
+                    </motion.div>
+                ) : aiInsights ? (
+                    <motion.div key="results" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-12 relative z-10">
+                        <div className="p-12 md:p-16 rounded-[3rem] bg-[#111116] border border-white/5 shadow-2xl relative overflow-hidden">
+                            <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-indigo-500/[0.07] via-transparent to-purple-500/[0.07] pointer-events-none" />
+                            <div className="absolute -top-24 -right-24 w-64 h-64 bg-indigo-500/10 blur-[80px] rounded-full" />
+                            
+                            <div className="relative z-10">
+                                <div className="flex items-center gap-3 mb-10">
+                                    <div className="h-1 w-12 bg-indigo-400 rounded-full" />
+                                    <span className="text-indigo-400 text-[12px] font-black uppercase tracking-[0.6em]">EXECUTIVE SUMMARY</span>
+                                    {intelligenceMode === 'correlation' && (
+                                        <span className="ml-auto bg-indigo-500/20 text-indigo-400 text-[9px] font-bold px-3 py-1 rounded-full border border-indigo-500/30 tracking-widest">NEURAL CORRELATION</span>
+                                    )}
+                                    {intelligenceMode === 'standalone' && (
+                                        <span className="ml-auto bg-white/5 text-white/40 text-[9px] font-bold px-3 py-1 rounded-full border border-white/10 tracking-widest">INDEPENDENT AUDIT</span>
+                                    )}
+                                </div>
+                                
+                                <div className="text-2xl md:text-3xl text-white font-medium leading-[1.5] tracking-tight max-w-5xl mb-12">
+                                    <TypewriterText text={aiInsights.summary} />
+                                </div>
+
+                                <div className="flex flex-wrap gap-4 pt-8 border-t border-white/5">
+                                    <div className="flex items-center gap-4 px-6 py-4 bg-white/5 rounded-2xl border border-white/10 group hover:border-emerald-500/50 transition-all">
+                                        <div className="p-2 bg-emerald-500/10 rounded-lg text-emerald-400">
+                                            <FiTrendingUp size={18} />
+                                        </div>
+                                        <div>
+                                            <p className="text-[9px] text-white/40 uppercase tracking-widest font-black">Projected ROI Impact</p>
+                                            <p className="text-white font-bold text-sm uppercase">{aiInsights.roi_impact || "Calculating..."}</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-4 px-6 py-4 bg-white/5 rounded-2xl border border-white/10 group hover:border-indigo-500/50 transition-all">
+                                        <div className="p-2 bg-indigo-500/10 rounded-lg text-indigo-400">
+                                            <FiActivity size={18} />
+                                        </div>
+                                        <div>
+                                            <p className="text-[9px] text-white/40 uppercase tracking-widest font-black">Neural Confidence</p>
+                                            <p className="text-white font-bold text-sm uppercase">{aiInsights.confidence || "94.2%"}</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                            <InsightCard title="Primary Root Cause" content={aiInsights.root_cause} icon={FaSearch} isPurple={false} onClick={() => setExpandedCard("root")} />
+                            <InsightCard title="Risk Exposure" content={aiInsights.risk} icon={FiShield} isPurple={true} onClick={() => setExpandedCard("risk")} />
+                            <InsightCard title="Growth Opportunity" content={aiInsights.opportunity} icon={FaRobot} isPurple={false} onClick={() => setExpandedCard("opp")} />
+                            <InsightCard title="Recommended Action" content={aiInsights.action} icon={FiTarget} isPurple={true} onClick={() => setExpandedCard("action")} />
+                        </div>
+                    </motion.div>
+                ) : (
+                    <div className="py-48 flex flex-col items-center justify-center relative z-10">
+                        <button 
+                            onClick={handleInitialClick}
+                            className="px-12 py-6 bg-indigo-500 text-white rounded-2xl font-black uppercase tracking-widest hover:scale-105 transition-all shadow-2xl shadow-indigo-500/40"
+                        >
+                            Initialize Neural Analysis
+                        </button>
+                    </div>
+                )}
+            </AnimatePresence>
+
+            {/* Modals for Expanded Cards and Full Report */}
+            <AnimatePresence>
+                {expandedCard && (
+                    <motion.div 
+                        initial={{ opacity: 0 }} 
+                        animate={{ opacity: 1 }} 
+                        exit={{ opacity: 0 }} 
+                        className="fixed inset-0 z-[10000] bg-[#0a0a0f]/90 backdrop-blur-xl flex items-center justify-center p-6 md:pl-[300px]"
+                    >
+                        <div className="max-w-4xl w-full bg-[#111116] border border-white/10 rounded-[3rem] p-12 relative shadow-2xl overflow-y-auto max-h-[90vh]">
+                            <button onClick={() => setExpandedCard(null)} className="absolute top-6 right-6 text-white/60 hover:text-white transition-colors"><FiX size={26} /></button>
+                            <h3 className="text-white text-2xl font-bold mb-6">
+                                {expandedCard === "root" && "Primary Root Cause"}
+                                {expandedCard === "risk" && "Risk Exposure"}
+                                {expandedCard === "opp" && "Growth Opportunity"}
+                                {expandedCard === "action" && "Recommended Action"}
+                            </h3>
+                            <p className="text-white/80 text-lg leading-relaxed font-light">
+                                {expandedCard === "root" && aiInsights.root_cause}
+                                {expandedCard === "risk" && aiInsights.risk}
+                                {expandedCard === "opp" && aiInsights.opportunity}
+                                {expandedCard === "action" && aiInsights.action}
+                            </p>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+                {isFullReportOpen && (
+                    <motion.div 
+                        initial={{ opacity: 0 }} 
+                        animate={{ opacity: 1 }} 
+                        exit={{ opacity: 0 }} 
+                        className="fixed inset-0 z-[10001] bg-[#0b0b11]/95 backdrop-blur-2xl p-6 md:p-10 md:pl-[320px] flex flex-col overflow-y-auto"
+                    >
+                        <div className="max-w-6xl mx-auto w-full">
+                            <div className="flex justify-between items-center mb-12">
+                                <div>
+                                    <h2 className="text-white text-2xl md:text-4xl font-black uppercase tracking-tight">Full Intelligence Briefing</h2>
+                                    <p className="text-indigo-400 text-xs mt-2 uppercase tracking-[0.3em] font-bold">Strategy: {intelligenceMode || 'Standard'}</p>
+                                </div>
+                                <button onClick={() => setIsFullReportOpen(false)} className="text-white/60 hover:text-white transition-colors"><FiX size={34} /></button>
+                            </div>
+                            <div className="space-y-12">
+                                <Section label="Executive Summary" text={aiInsights.summary} />
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="p-6 bg-white/5 border border-white/10 rounded-2xl">
+                                        <h4 className="text-emerald-400 text-[10px] font-black uppercase tracking-widest mb-2">ROI Impact</h4>
+                                        <p className="text-white text-xl font-bold">{aiInsights.roi_impact || "High Strategic Yield"}</p>
+                                    </div>
+                                    <div className="p-6 bg-white/5 border border-white/10 rounded-2xl">
+                                        <h4 className="text-indigo-400 text-[10px] font-black uppercase tracking-widest mb-2">Confidence Level</h4>
+                                        <p className="text-white text-xl font-bold">{aiInsights.confidence || "94.2% Neural Match"}</p>
+                                    </div>
+                                </div>
+                                <Section label="Primary Root Cause" text={aiInsights.root_cause} />
+                                <Section label="Risk Exposure" text={aiInsights.risk} />
+                                <Section label="Opportunity" text={aiInsights.opportunity} />
+                                <Section label="Recommended Action" text={aiInsights.action} />
+                            </div>
+                            <div className="flex justify-end mt-12 gap-6 pb-20">
+                                <button onClick={() => toggleSpeech()} className="flex items-center gap-3 px-10 py-4 bg-indigo-500 text-white rounded-xl text-[13px] font-black uppercase tracking-widest hover:bg-white hover:text-black transition-all">
+                                    <FaVolumeUp /> {isSpeaking ? "Stop Briefing" : "Read Out Loud"}
+                                </button>
+                            </div>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
+};
+
+const Section = ({ label, text }) => (
+    <div className="border-l-2 border-indigo-500/20 pl-8">
+        <h3 className="text-indigo-400 text-[12px] uppercase tracking-[0.5em] font-black mb-3">{label}</h3>
+        <p className="text-white text-xl leading-relaxed font-light">{text}</p>
+    </div>
+);
+
+export default AIAnalysisPanel;
